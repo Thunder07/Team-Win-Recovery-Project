@@ -117,6 +117,7 @@ void MultiROM::findPath()
 
 	static const char *paths[] = {
 		"/data/media/multirom",
+		"/sdcard/media/0/multirom",
 		"/data/media/0/multirom",
 		NULL
 	};
@@ -367,6 +368,7 @@ void MultiROM::deinitBackup()
 
 int MultiROM::getType(std::string name)
 {
+	return ROM_ANDROID_USB_IMG;
 	std::string path = getRomsPath() + "/" + name + "/";
 	if(getRomsPath().find("/mnt") != 0) // Internal memory
 	{
@@ -708,6 +710,7 @@ void MultiROM::restoreMounts()
 
 void MultiROM::translateToRealdata(std::string& path)
 {
+	return;
 	if(path.find("/sdcard/") != std::string::npos)
 	{
 		struct stat info;
@@ -1644,6 +1647,7 @@ bool MultiROM::disableFlashKernelAct(std::string name, std::string loc)
 
 int MultiROM::getType(int os, std::string loc)
 {
+	return ROM_ANDROID_USB_IMG;
 	bool images = installLocNeedsImages(loc);
 	switch(os)
 	{
