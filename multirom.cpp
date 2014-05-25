@@ -664,6 +664,51 @@ bool MultiROM::changeMounts(std::string name)
 	return true;
 }
 
+bool MultiROM::changeMounts2(std::string name)
+{
+	gui_print("Changing mounts to ROM %s...\n", name.c_str());
+
+	char cmd[256];
+	static const char *parts[] = { "system_t", "data_t", "cache_t" };
+	static const char *imgs[] = { "system", "data", "cache" };
+	for(size_t i = 0; i < sizeof(parts)/sizeof(parts[0]); ++i)
+		{
+			mkdir(parts[i], 0777);
+			sprintf(cmd, "mount -o loop %s/%s/%s.img /%s", getRomsPath().c_str(), name.c_str(), imgs[i], parts[i]);
+			if(system(cmd) != 0)
+			{
+				gui_print("Failed to mount %s image!\n",imgs[i]);
+				return false;
+			}
+
+		}
+
+	
+
+	return true;
+}
+
+bool MultiROM::uMounts2(std::string name)
+{
+	gui_print("Unmounting ROM %s...\n", name.c_str());
+
+	char cmd[256];
+	static const char *parts[] = { "system_t", "data_t", "cache_t" };
+	for(size_t i = 0; i < sizeof(parts)/sizeof(parts[0]); ++i)
+		{
+			sprintf(cmd, "umount /%s", parts[i]);
+			if(system(cmd) != 0)
+			{
+				gui_print("Failed to unmount %s!\n",parts[i]);
+			}
+
+		}
+
+	
+
+	return true;
+}
+
 void MultiROM::restoreMounts()
 {
 	gui_print("Restoring mounts...\n");
@@ -2688,6 +2733,87 @@ bool MultiROM::copyPartWithXAttrs(const std::string& src, const std::string& dst
 	}
 }
 
+bool MultiROM::copyPartWithXAttrs2(const std::string& src, const std::string& dst, const std::string& part, bool skipMedia)
+{
+	if(!skipMedia)
+	{
+		gui_print("Copying /%s...\n", part.c_str());
+		if(system_args("cp -a \"%s/%s/\"* \"%s/%s_t/\"", src.c_str(), part.c_str(), dst.c_str(), part.c_str()) != 0)
+		{
+			LOGERR("Copying failed, see log for more info!\n");
+			return false;
+		}
+
+		if(!copyXAttrs(src + "/" + part, dst + "/" + part + "_t", DT_DIR))
+			return false;
+
+		return true;
+	}
+	else
+	{
+		char path1[256];
+		char path2[256];
+		DIR *d;
+		struct dirent *dt;
+		bool res = true;
+
+		gui_print("Copying /%s...\n", part.c_str());
+
+		snprintf(path1, sizeof(path1), "%s/%s", src.c_str(), part.c_str());
+		snprintf(path2, sizeof(path2), "%s/%s_t", dst.c_str(), part.c_str());
+
+		if(!copySingleXAttr(path1, path2))
+			return false;
+
+		d = opendir(path1);
+		if(!d)
+		{
+			LOGERR("Failed to open %s!\n", path1);
+			return false;
+		}
+
+		while((dt = readdir(d)))
+		{
+			if (dt->d_type == DT_DIR && dt->d_name[0] == '.' &&
+				(dt->d_name[1] == '.' || dt->d_name[1] == 0))
+				continue;
+
+			if(dt->d_type == DT_DIR && strcmp(dt->d_name, "media") == 0)
+			{
+				struct stat st;
+				snprintf(path1, sizeof(path1), "%s/%s/media", src.c_str(), part.c_str());
+				snprintf(path2, sizeof(path2), "%s/%s_t/media", dst.c_str(), part.c_str());
+
+				if(stat(path1, &st) >= 0)
+				{
+					mkdir(path2, st.st_mode);
+					copySingleXAttr(path1, path2);
+				}
+				continue;
+			}
+
+			if(system_args("cp -a \"%s/%s/%s\" \"%s/%s_t/\"", src.c_str(), part.c_str(), dt->d_name, dst.c_str(), part.c_str()) != 0)
+			{
+				LOGERR("Copying failed, see log for more info!\n");
+				res = false;
+				break;
+			}
+
+			snprintf(path1, sizeof(path1), "%s/%s/%s", src.c_str(), part.c_str(), dt->d_name);
+			snprintf(path2, sizeof(path2), "%s/%s_t/%s", dst.c_str(), part.c_str(), dt->d_name);
+
+			if(!copyXAttrs(path1, path2, dt->d_type))
+			{
+				res = false;
+				break;
+			}
+		}
+
+		closedir(d);
+		return res;
+	}
+}
+
 bool MultiROM::copySingleXAttr(const char *from, const char *to)
 {
 	ssize_t res;
@@ -2776,7 +2902,11 @@ bool MultiROM::copyInternal(const std::string& dest_name)
 		return false;
 	}
 
-	if(!createDirs(dest_name, ROM_ANDROID_INTERNAL))
+	MultiROM::addBaseFolder("data", DATA_IMG_MINSIZE, DATA_IMG_DEFSIZE);
+	MultiROM::addBaseFolder("system", SYS_IMG_MINSIZE, SYS_IMG_DEFSIZE);
+	MultiROM::addBaseFolder("cache", CACHE_IMG_MINSIZE, CACHE_IMG_DEFSIZE);
+
+	if(!createDirs(dest_name, ROM_ANDROID_USB_IMG))
 		goto erase_incomplete;
 
 	gui_print("Copying boot partition...\n");
@@ -2790,15 +2920,20 @@ bool MultiROM::copyInternal(const std::string& dest_name)
 	if(!extractBootForROM(dest_dir))
 		goto erase_incomplete;
 
+	changeMounts2(dest_name);
+
 	static const char *parts[] = { "system", "data", "cache" };
 	for(size_t i = 0; i < sizeof(parts)/sizeof(parts[0]); ++i)
-		if(!copyPartWithXAttrs("", dest_dir, parts[i], strcmp(parts[i], "data") == 0))
+		if(!copyPartWithXAttrs2("", "", parts[i], strcmp(parts[i], "data") == 0))
 			goto erase_incomplete;
+
+	uMounts2(dest_name);
 
 	return true;
 
 erase_incomplete:
 	gui_print("Failed, removing incomplete ROM...\n");
+	uMounts2(dest_name);
 	system_args("rm -rf \"%s\"", dest_dir.c_str());
 	return false;
 }
