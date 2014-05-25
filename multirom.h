@@ -58,12 +58,8 @@ enum
 #define MAX_BASE_FOLDER_CNT 5
 
 // default image sizes
-#ifndef BOARD_SYSTEMIMAGE_PARTITION_SIZE
-#define SYS_IMG_DEFSIZE 640
-#else
-#define SYS_IMG_DEFSIZE (BOARD_SYSTEMIMAGE_PARTITION_SIZE/1024/1024)
-#endif
-#define DATA_IMG_DEFSIZE 1024
+#define SYS_IMG_DEFSIZE 1024
+#define DATA_IMG_DEFSIZE 2048
 #define CACHE_IMG_DEFSIZE 436
 
 #define SYS_IMG_MINSIZE 450
@@ -172,6 +168,8 @@ public:
 private:
 	static void findPath();
 	static bool changeMounts(std::string base);
+	static bool changeMounts2(std::string base);
+	static bool uMounts2(std::string base);
 	static void restoreMounts();
 	static bool prepareZIP(std::string& file);
 	static bool verifyZIP(const std::string& file, int &verify_status);
@@ -206,6 +204,7 @@ private:
 	static void restoreROMPath();
 
 	static bool copyPartWithXAttrs(const std::string& src, const std::string& dst, const std::string& part, bool skipMedia = false);
+	static bool copyPartWithXAttrs2(const std::string& src, const std::string& dst, const std::string& part, bool skipMedia = false);
 	static bool copyXAttrs(const std::string& from, const std::string& to, unsigned char type);
 	static bool copySingleXAttr(const char *from, const char *to);
 
