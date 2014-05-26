@@ -956,6 +956,11 @@ static char *strstr_wildcard(const char *s, const char *find)
 
 bool MultiROM::skipLine(const char *line)
 {
+
+	if(strstr(line, "mount") && strstr(line, "ui_print"))
+		if (strstr(line, "mount") < strstr(line, "ui_print"))
+			return true;
+
 	if(strstr(line, "mount") && !strstr(line, "ui_print"))
 	{
 		if (strstr(line, "run_program") ||
@@ -974,7 +979,7 @@ bool MultiROM::skipLine(const char *line)
 		return false;
 	}
 
-	if(strstr(line, "/dev/block/platform/"))
+	if(strstr(line, "/dev/block/"))
 		return true;
 
 	if(strstr(line, "\"dd\"") && strstr(line, "run_program"))
@@ -1082,7 +1087,7 @@ bool MultiROM::prepareZIP(std::string& file)
 
 	if(changed)
 	{
-		sprintf(cmd, "cd /tmp && zip %s %s", file.c_str(), MR_UPDATE_SCRIPT_NAME);
+		sprintf(cmd, "cd /tmp && zip \"%s\" %s", file.c_str(), MR_UPDATE_SCRIPT_NAME);
 		if(system(cmd) < 0)
 			return false;
 	}
@@ -2402,7 +2407,7 @@ bool MultiROM::fakeBootPartition(const char *fakeImg)
 	}
 
 	system_args("echo '%s' > /tmp/mrom_fakebootpart", m_boot_dev.c_str());
-	system_args("mv \"%s\" \"%s\"-orig", m_boot_dev.c_str(), m_boot_dev.c_str());
+	system_args("mv \"%s\" \"%s-orig\"", m_boot_dev.c_str(), m_boot_dev.c_str());
 	system_args("ln -s \"%s\" \"%s\"", fakeImg, m_boot_dev.c_str());
 
 #ifdef BOARD_BOOTIMAGE_PARTITION_SIZE
