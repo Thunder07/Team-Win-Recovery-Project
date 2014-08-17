@@ -97,7 +97,7 @@ GUIAction::GUIAction(xml_node<>* node)
 
 		attr = child->first_attribute("function");
 		if (!attr)  return;
-	
+
 		action.mFunction = attr->value();
 		action.mArg = child->value();
 		mActions.push_back(action);
@@ -504,7 +504,7 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 			gui_print("Simulating actions...\n");
 		return 0;
 	}
-	
+
 	if (function == "restoredefaultsettings")
 	{
 		operation_start("Restore Defaults");
@@ -518,7 +518,7 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		operation_end(0, simulate);
 		return 0;
 	}
-	
+
 	if (function == "copylog")
 	{
 		operation_start("Copy Log");
@@ -535,7 +535,7 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		operation_end(0, simulate);
 		return 0;
 	}
-	
+
 	if (function == "compute" || function == "addsubtract")
 	{
 		if (arg.find("+") != string::npos)
@@ -591,27 +591,27 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		LOGERR("Unable to perform compute '%s'\n", arg.c_str());
 		return -1;
 	}
-	
+
 	if (function == "setguitimezone")
 	{
 		string SelectedZone;
 		DataManager::GetValue(TW_TIME_ZONE_GUISEL, SelectedZone); // read the selected time zone into SelectedZone
 		string Zone = SelectedZone.substr(0, SelectedZone.find(';')); // parse to get time zone
 		string DSTZone = SelectedZone.substr(SelectedZone.find(';') + 1, string::npos); // parse to get DST component
-		
+
 		int dst;
 		DataManager::GetValue(TW_TIME_ZONE_GUIDST, dst); // check wether user chose to use DST
-		
+
 		string offset;
 		DataManager::GetValue(TW_TIME_ZONE_GUIOFFSET, offset); // pull in offset
-		
+
 		string NewTimeZone = Zone;
 		if (offset != "0")
 			NewTimeZone += ":" + offset;
-		
+
 		if (dst != 0)
 			NewTimeZone += DSTZone;
-		
+
 		DataManager::SetValue(TW_TIME_ZONE_VAR, NewTimeZone);
 		DataManager::update_tz_environment_variables();
 		return 0;
@@ -621,7 +621,7 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		LOGERR("togglestorage action was deprecated from TWRP\n");
 		return 0;
 	}
-	
+
 	if (function == "overlay")
 		return gui_changeOverlay(arg);
 
@@ -684,6 +684,96 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		operation_start("GenerateBackupName");
 		TWFunc::Auto_Generate_Backup_Name();
 		operation_end(0, simulate);
+		return 0;
+	}
+	if (function == "checkpartitionlist") {
+		string Wipe_List, wipe_path;
+		int count = 0;
+
+		DataManager::GetValue("tw_wipe_list", Wipe_List);
+		LOGINFO("checkpartitionlist list '%s'\n", Wipe_List.c_str());
+		if (!Wipe_List.empty()) {
+			size_t start_pos = 0, end_pos = Wipe_List.find(";", start_pos);
+			while (end_pos != string::npos && start_pos < Wipe_List.size()) {
+				wipe_path = Wipe_List.substr(start_pos, end_pos - start_pos);
+				LOGINFO("checkpartitionlist wipe_path '%s'\n", wipe_path.c_str());
+				if (wipe_path == "/and-sec" || wipe_path == "DALVIK" || wipe_path == "INTERNAL") {
+					// Do nothing
+				} else {
+					count++;
+				}
+				start_pos = end_pos + 1;
+				end_pos = Wipe_List.find(";", start_pos);
+			}
+			DataManager::SetValue("tw_check_partition_list", count);
+		} else {
+			DataManager::SetValue("tw_check_partition_list", 0);
+		}
+		return 0;
+	}
+	if (function == "getpartitiondetails") {
+		string Wipe_List, wipe_path;
+		int count = 0;
+
+		DataManager::GetValue("tw_wipe_list", Wipe_List);
+		LOGINFO("getpartitiondetails list '%s'\n", Wipe_List.c_str());
+		if (!Wipe_List.empty()) {
+			size_t start_pos = 0, end_pos = Wipe_List.find(";", start_pos);
+			while (end_pos != string::npos && start_pos < Wipe_List.size()) {
+				wipe_path = Wipe_List.substr(start_pos, end_pos - start_pos);
+				LOGINFO("getpartitiondetails wipe_path '%s'\n", wipe_path.c_str());
+				if (wipe_path == "/and-sec" || wipe_path == "DALVIK" || wipe_path == "INTERNAL") {
+					// Do nothing
+				} else {
+					DataManager::SetValue("tw_partition_path", wipe_path);
+					break;
+				}
+				start_pos = end_pos + 1;
+				end_pos = Wipe_List.find(";", start_pos);
+			}
+			if (!wipe_path.empty()) {
+				TWPartition* Part = PartitionManager.Find_Partition_By_Path(wipe_path);
+				if (Part) {
+					unsigned long long mb = 1048576;
+
+					DataManager::SetValue("tw_partition_name", Part->Display_Name);
+					DataManager::SetValue("tw_partition_mount_point", Part->Mount_Point);
+					DataManager::SetValue("tw_partition_file_system", Part->Current_File_System);
+					DataManager::SetValue("tw_partition_size", Part->Size / mb);
+					DataManager::SetValue("tw_partition_used", Part->Used / mb);
+					DataManager::SetValue("tw_partition_free", Part->Free / mb);
+					DataManager::SetValue("tw_partition_backup_size", Part->Backup_Size / mb);
+					DataManager::SetValue("tw_partition_removable", Part->Removable);
+					DataManager::SetValue("tw_partition_is_present", Part->Is_Present);
+
+					if (Part->Can_Repair())
+						DataManager::SetValue("tw_partition_can_repair", 1);
+					else
+						DataManager::SetValue("tw_partition_can_repair", 0);
+					if (TWFunc::Path_Exists("/sbin/mkdosfs"))
+						DataManager::SetValue("tw_partition_vfat", 1);
+					else
+						DataManager::SetValue("tw_partition_vfat", 0);
+					if (TWFunc::Path_Exists("/sbin/mkfs.exfat"))
+						DataManager::SetValue("tw_partition_exfat", 1);
+					else
+						DataManager::SetValue("tw_partition_exfat", 0);
+					if (TWFunc::Path_Exists("/sbin/mkfs.f2fs"))
+						DataManager::SetValue("tw_partition_f2fs", 1);
+					else
+						DataManager::SetValue("tw_partition_f2fs", 0);
+					if (TWFunc::Path_Exists("/sbin/mke2fs"))
+						DataManager::SetValue("tw_partition_ext", 1);
+					else
+						DataManager::SetValue("tw_partition_ext", 0);
+					return 0;
+				} else {
+					LOGERR("Unable to locate partition: '%s'\n", wipe_path.c_str());
+				}
+			}
+		}
+		DataManager::SetValue("tw_partition_name", "");
+		DataManager::SetValue("tw_partition_file_system", "");
 		return 0;
 	}
 
@@ -773,12 +863,18 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		DataManager::SetValue("tw_multirom_is_android", (M(type) & MASK_ANDROID) != 0);
 		DataManager::SetValue("tw_multirom_is_ubuntu", (M(type) & MASK_UBUNTU) != 0);
 		DataManager::SetValue("tw_multirom_is_touch", (M(type) & MASK_UTOUCH) != 0);
+		DataManager::SetValue("tw_multirom_is_sailfish", (M(type) & MASK_SAILFISH) != 0);
 		if((M(type) & MASK_ANDROID) != 0)
 		{
 			std::string path = MultiROM::getRomsPath() + "/" + name + "/boot.img";
 			DataManager::SetValue("tw_multirom_has_bootimg", access(path.c_str(), F_OK) >= 0);
 		}
 		DataManager::SetValue("tw_multirom_has_fw_partition", MultiROM::hasFirmwareDev());
+		if(MultiROM::hasFirmwareDev())
+		{
+			std::string fw_file = MultiROM::getRomsPath() + DataManager::GetStrValue("tw_multirom_rom_name") + "/firmware.img";
+			DataManager::SetValue("tw_multirom_has_fw_image", int(access(fw_file.c_str(), F_OK) >= 0));
+		}
 		return gui_changePage("multirom_manage");
 	}
 
@@ -800,6 +896,9 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		DataManager::SetValue("tw_multirom_int_display_name", cfg.int_display_name);
 		DataManager::SetValue("tw_multirom_rotation", cfg.rotation);
 		DataManager::SetValue("tw_multirom_force_generic_fb", cfg.force_generic_fb);
+		DataManager::SetValue("tw_anim_duration_coef_pct", cfg.anim_duration_coef_pct);
+
+		DataManager::SetValue("tw_multirom_unrecognized_opts", cfg.unrecognized_opts);
 
 		DataManager::SetValue("tw_multirom_roms", MultiROM::listRoms());
 		return gui_changePage("multirom_settings");
@@ -822,6 +921,9 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		cfg.int_display_name = DataManager::GetStrValue("tw_multirom_int_display_name");
 		cfg.rotation = DataManager::GetIntValue("tw_multirom_rotation");
 		cfg.force_generic_fb = DataManager::GetIntValue("tw_multirom_force_generic_fb");
+		cfg.anim_duration_coef_pct = DataManager::GetIntValue("tw_anim_duration_coef_pct");
+
+		cfg.unrecognized_opts = DataManager::GetStrValue("tw_multirom_unrecognized_opts");
 
 		MultiROM::saveConfig(cfg);
 		return 0;
@@ -841,10 +943,10 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		{
 			case 1:
 				return gui_changePage("multirom_add_source");
-			case 4:
-				DataManager::SetValue("tw_touch_filename_device", "");
-				DataManager::SetValue("tw_touch_filename_core", "");
-				return gui_changePage("multirom_add_touch");
+			case 5:
+				DataManager::SetValue("tw_sailfish_filename_base", "");
+				DataManager::SetValue("tw_sailfish_filename_rootfs", "");
+				return gui_changePage("multirom_add_sailfish");
 			default:
 				return gui_changePage("multirom_add_select");
 		}
@@ -860,7 +962,7 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 
 		MultiROM::clearBaseFolders();
 
-		if(type == 1 || type == 2 || type == 4)
+		if(type == 1 || type == 2 || type == 5)
 		{
 			switch(type)
 			{
@@ -872,8 +974,8 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 				case 2: // Ubuntu dekstop
 					MultiROM::addBaseFolder("root", UB_DATA_IMG_MINSIZE, UB_DATA_IMG_DEFSIZE);
 					break;
-				case 4: // Ubuntu touch
-					MultiROM::addBaseFolder("data", TOUCH_DATA_IMG_MINSIZE,  TOUCH_DATA_IMG_DEFSIZE);
+				case 5: // SailfishOS
+					MultiROM::addBaseFolder("data", SAILFISH_DATA_IMG_MINSIZE, SAILFISH_DATA_IMG_DEFSIZE);
 					MultiROM::addBaseFolder("system", SYS_IMG_MINSIZE, SYS_IMG_DEFSIZE);
 					MultiROM::addBaseFolder("cache", CACHE_IMG_MINSIZE, CACHE_IMG_DEFSIZE);
 					break;
@@ -1061,6 +1163,34 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 				if(!MultiROM::extractBootForROM(MultiROM::getRomsPath() + name))
 					op_status = 1;
 			}
+
+			operation_end(op_status, simulate);
+			return 0;
+		}
+
+		if (function == "multirom_flash_zip_sailfish")
+		{
+			operation_start("Flashing");
+			int op_status = 0;
+
+			std::string name = DataManager::GetStrValue("tw_multirom_rom_name");
+			std::string root = MultiROM::getRomsPath() + name;
+
+			if(rename((root + "/data/.stowaways/sailfishos/system").c_str(), (root + "/system").c_str()) < 0)
+				gui_print("/system move failed %s", strerror(errno));
+
+
+			if (!MultiROM::flashZip(name, DataManager::GetStrValue("tw_filename")))
+				op_status = 1;
+
+			if(rename((root + "/system").c_str(), (root + "/data/.stowaways/sailfishos/system").c_str()) < 0)
+				gui_print("/system move failed %s", strerror(errno));
+
+			if(!MultiROM::sailfishProcessBoot(root))
+				op_status = 1;
+
+			if(!MultiROM::sailfishProcess(root, name))
+				op_status = 1;
 
 			operation_end(op_status, simulate);
 			return 0;
@@ -1362,42 +1492,25 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 			std::string src = DataManager::GetStrValue("tw_filename");
 			std::string dst = MultiROM::getRomsPath() + DataManager::GetStrValue("tw_multirom_rom_name") + "/firmware.img";
 
+			gui_print("Setting ROM's radio.img to %s", src.c_str());
 			int res = TWFunc::copy_file(src, dst, 0755) == 0 ? 0 : 1;
+
+			DataManager::SetValue("tw_multirom_has_fw_image", int(access(dst.c_str(), F_OK) >= 0));
 
 			operation_end(res, simulate);
 			return 0;
 		}
 
-		if(function == "multirom_f2fs_ext4_switch")
+		if(function == "multirom_remove_fw")
 		{
-			operation_start("SwitchF2fsExt4");
-			std::vector<std::string> parts = TWFunc::Split_String(DataManager::GetStrValue("tw_switch_list"), ";");
-			std::string fs = DataManager::GetStrValue("tw_switch_fs_type");
-			int result = 0;
-			if (simulate) {
-				simulate_progress_bar();
-			} else {
-				for(std::vector<std::string>::iterator itr = parts.begin(); itr != parts.end(); ++itr)
-				{
-					gui_print("Formatting %s to %s...\n", (*itr).c_str(), fs.c_str());
-					TWPartition *p = PartitionManager.Find_Partition_By_Path(*itr);
-					if(!p)
-					{
-						result = 1;
-						LOGERR("Failed to find partition '%s'\n", (*itr).c_str());
-						break;
-					}
+			operation_start("RemoveFW");
 
-					if(!p->Wipe(fs, true))
-					{
-						result = 1;
-						LOGERR("Failed to wipe partition '%s'\n", (*itr).c_str());
-						break;
-					}
-					p->Check_FS_Type();
-				}
-			}
-			operation_end(result, simulate);
+			gui_print("Removing ROM's radio.img...");
+			std::string dst = MultiROM::getRomsPath() + DataManager::GetStrValue("tw_multirom_rom_name") + "/firmware.img";
+			int res = remove(dst.c_str()) >= 0 ? 0 : 1;
+			DataManager::SetValue("tw_multirom_has_fw_image", int(access(dst.c_str(), F_OK) >= 0));
+
+			operation_end(res, simulate);
 			return 0;
 		}
 
@@ -2029,6 +2142,49 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 					op_status = 0; // success
 				else
 					op_status = 1; // fail
+			}
+
+			operation_end(op_status, simulate);
+			return 0;
+		}
+		if (function == "repair")
+		{
+			int op_status = 0;
+
+			operation_start("Repair Partition");
+			if (simulate) {
+				simulate_progress_bar();
+			} else {
+				string part_path;
+				DataManager::GetValue("tw_partition_mount_point", part_path);
+				if (PartitionManager.Repair_By_Path(part_path, true)) {
+					op_status = 0; // success
+				} else {
+					LOGERR("Error repairing file system.\n");
+					op_status = 1; // fail
+				}
+			}
+
+			operation_end(op_status, simulate);
+			return 0;
+		}
+		if (function == "changefilesystem")
+		{
+			int op_status = 0;
+
+			operation_start("Change File System");
+			if (simulate) {
+				simulate_progress_bar();
+			} else {
+				string part_path, file_system;
+				DataManager::GetValue("tw_partition_mount_point", part_path);
+				DataManager::GetValue("tw_action_new_file_system", file_system);
+				if (PartitionManager.Wipe_By_Path(part_path, file_system)) {
+					op_status = 0; // success
+				} else {
+					LOGERR("Error changing file system.\n");
+					op_status = 1; // fail
+				}
 			}
 
 			operation_end(op_status, simulate);

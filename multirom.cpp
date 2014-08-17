@@ -75,6 +75,7 @@ MultiROM::config::config()
 	rotation = TW_DEFAULT_ROTATION;
 	enable_adb = 0;
 	force_generic_fb = 0;
+	anim_duration_coef_pct = 100;
 }
 
 bool MultiROM::folderExists()
@@ -218,8 +219,8 @@ void MultiROM::updateSupportedSystems()
 	snprintf(p, sizeof(p), "%s/infos/ubuntu.txt", m_path.c_str());
 	DataManager::SetValue("tw_multirom_ubuntu_supported", (access(p, F_OK) >= 0) ? 1 : 0);
 
-	snprintf(p, sizeof(p), "%s/infos/ubuntu_touch.txt", m_path.c_str());
-	DataManager::SetValue("tw_multirom_touch_supported", (access(p, F_OK) >= 0) ? 1 : 0);
+	snprintf(p, sizeof(p), "%s/infos/sailfishos.txt", m_path.c_str());
+	DataManager::SetValue("tw_multirom_sailfish_supported", (access(p, F_OK) >= 0) ? 1 : 0);
 }
 
 bool MultiROM::installLocNeedsImages(const std::string& loc)
@@ -339,6 +340,7 @@ bool MultiROM::initBackup(const std::string& name)
 	}
 
 	DataManager::SetValue("multirom_do_backup", 1);
+	DataManager::SetValue("multirom_rom_name_title", 1);
 	return true;
 }
 
@@ -350,6 +352,7 @@ void MultiROM::deinitBackup()
 	restoreMounts();
 
 	DataManager::SetValue("multirom_do_backup", 0);
+	DataManager::SetValue("multirom_rom_name_title", 0);
 
 	if(hadInternalStorage)
 	{
@@ -384,6 +387,12 @@ int MultiROM::getType(std::string name)
 				return ROM_ANDROID_INTERNAL;
 			else
 				return ROM_UTOUCH_INTERNAL;
+		}
+
+		if (access((path + "data").c_str(), F_OK) >= 0 && 
+			access((path + "rom_info.txt").c_str(), F_OK) >= 0)
+		{
+			return ROM_SAILFISH_INTERNAL;
 		}
 
 		if(access((path + "root").c_str(), F_OK) >= 0)
@@ -504,7 +513,7 @@ MultiROM::config MultiROM::loadConfig()
 				cfg.auto_boot_rom = val;
 			else if(name == "auto_boot_type")
 				cfg.auto_boot_type = atoi(val.c_str());
-			else if(name == "colors")
+			else if(name == "colors_v2")
 				cfg.colors = atoi(val.c_str());
 			else if(name == "brightness")
 				cfg.brightness = atoi(val.c_str());
@@ -518,6 +527,10 @@ MultiROM::config MultiROM::loadConfig()
 				cfg.rotation = atoi(val.c_str());
 			else if(name == "force_generic_fb")
 				cfg.force_generic_fb = atoi(val.c_str());
+			else if(name == "anim_duration_coef_pct")
+				cfg.anim_duration_coef_pct = atoi(val.c_str());
+			else
+				cfg.unrecognized_opts += name + "=" + val + "\n";
 		}
 		fclose(f);
 	}
@@ -534,14 +547,16 @@ void MultiROM::saveConfig(const MultiROM::config& cfg)
 	fprintf(f, "auto_boot_seconds=%d\n", cfg.auto_boot_seconds);
 	fprintf(f, "auto_boot_rom=%s\n", cfg.auto_boot_rom.c_str());
 	fprintf(f, "auto_boot_type=%d\n", cfg.auto_boot_type);
-	fprintf(f, "colors=%d\n", cfg.colors);
+	fprintf(f, "colors_v2=%d\n", cfg.colors);
 	fprintf(f, "brightness=%d\n", cfg.brightness);
 	fprintf(f, "enable_adb=%d\n", cfg.enable_adb);
 	fprintf(f, "hide_internal=%d\n", cfg.hide_internal);
 	fprintf(f, "int_display_name=%s\n", cfg.int_display_name.c_str());
 	fprintf(f, "rotation=%d\n", cfg.rotation);
 	fprintf(f, "force_generic_fb=%d\n", cfg.force_generic_fb);
+	fprintf(f, "anim_duration_coef_pct=%d\n", cfg.anim_duration_coef_pct);
 
+	fputs(cfg.unrecognized_opts.c_str(), f);
 	fclose(f);
 }
 
@@ -1088,7 +1103,7 @@ bool MultiROM::prepareZIP(std::string& file)
 	if(changed)
 	{
 		sprintf(cmd, "cd /tmp && zip \"%s\" %s", file.c_str(), MR_UPDATE_SCRIPT_NAME);
-		if(system(cmd) < 0)
+		if(system(cmd) != 0)
 			return false;
 	}
 	else
@@ -1368,9 +1383,16 @@ bool MultiROM::createImage(const std::string& base, const char *img, int size)
 
 	char cmd[256];
 
-	bool ctx = TWFunc::Path_Exists("/file_contexts");
+	// make_ext4fs errors out if it has unknown path
+	if(TWFunc::Path_Exists("/file_contexts") &&
+		(!strcmp(img, "data") ||
+		 !strcmp(img, "system") ||
+		 !strcmp(img, "cache"))) {
+		snprintf(cmd, sizeof(cmd), "make_ext4fs -l %dM -a \"/%s\" -S /file_contexts \"%s/%s.img\"", size, img, base.c_str(), img);
+	} else {
+		snprintf(cmd, sizeof(cmd), "make_ext4fs -l %dM \"%s/%s.img\"", size, base.c_str(), img);
+	}
 
-	snprintf(cmd, sizeof(cmd), "make_ext4fs -l %dM -a \"/%s\" %s \"%s/%s.img\"", size, img, ctx ? "-S /file_contexts" : "", base.c_str(), img);
 	LOGINFO("Creating image with cmd: %s\n", cmd);
 	return system(cmd) == 0;
 }
@@ -1470,6 +1492,7 @@ bool MultiROM::createDirs(std::string name, int type)
 		case ROM_UBUNTU_USB_DIR:
 		case ROM_INSTALLER_INTERNAL:
 		case ROM_INSTALLER_USB_DIR:
+		case ROM_SAILFISH_INTERNAL:
 			if(!createDirsFromBase(base))
 				return false;
 			break;
@@ -1551,17 +1574,13 @@ bool MultiROM::extractBootForROM(std::string base)
 
 bool MultiROM::ubuntuExtractImage(std::string name, std::string img_path, std::string dest)
 {
-	char cmd[256];
-	struct stat info;
-
 	if(img_path.find("img.gz") != std::string::npos)
 	{
 		gui_print("Decompressing the image (may take a while)...\n");
-		sprintf(cmd, "busybox gzip -d \"%s\"", img_path.c_str());
-		system(cmd);
+		system_args("busybox gzip -d \"%s\"", img_path.c_str());
 
 		img_path.erase(img_path.size()-3);
-		if(stat(img_path.c_str(), &info) < 0)
+		if(access(img_path.c_str(), F_OK) < 0)
 		{
 			gui_print("Failed to decompress the image, more space needed?");
 			return false;
@@ -1572,12 +1591,16 @@ bool MultiROM::ubuntuExtractImage(std::string name, std::string img_path, std::s
 	system("umount -d /mnt_ub_img");
 
 	gui_print("Converting the image (may take a while)...\n");
-	sprintf(cmd, "simg2img \"%s\" /tmp/rootfs.img", img_path.c_str());
-	system(cmd);
+	if(system_args("simg2img \"%s\" /tmp/rootfs.img", img_path.c_str()) != 0)
+	{
+		system("rm /tmp/rootfs.img");
+		gui_print("Failed to convert the image!\n");
+		return false;
+	}
 
 	system("mount /tmp/rootfs.img /mnt_ub_img");
 
-	if(stat("/mnt_ub_img/rootfs.tar.gz", &info) < 0)
+	if(access("/mnt_ub_img/rootfs.tar.gz", F_OK) < 0)
 	{
 		system("umount -d /mnt_ub_img");
 		system("rm /tmp/rootfs.img");
@@ -1586,16 +1609,22 @@ bool MultiROM::ubuntuExtractImage(std::string name, std::string img_path, std::s
 	}
 
 	gui_print("Extracting rootfs.tar.gz (will take a while)...\n");
-	sprintf(cmd, "zcat /mnt_ub_img/rootfs.tar.gz | gnutar x --numeric-owner -C \"%s\"",  dest.c_str());
-	system(cmd);
+	if(system_args("zcat /mnt_ub_img/rootfs.tar.gz | gnutar x --numeric-owner -C \"%s\"",  dest.c_str()) != 0)
+	{
+		system("umount -d /mnt_ub_img");
+		system("rm /tmp/rootfs.img");
+		gui_print("Failed to extract rootfs.tar.gz archive!\n");
+		return false;
+	}
 
 	sync();
 
 	system("umount -d /mnt_ub_img");
 	system("rm /tmp/rootfs.img");
 
-	sprintf(cmd, "%s/boot/vmlinuz", dest.c_str());
-	if(stat(cmd, &info) < 0)
+	char buff[256];
+	snprintf(buff, sizeof(buff), "%s/boot/vmlinuz", dest.c_str());
+	if(access(buff, F_OK) < 0)
 	{
 		gui_print("Failed to extract rootfs!\n");
 		return false;
@@ -1610,35 +1639,28 @@ bool MultiROM::patchUbuntuInit(std::string rootDir)
 	std::string initPath = rootDir + "/usr/share/initramfs-tools/";
 	std::string locPath = rootDir + "/usr/share/initramfs-tools/scripts/";
 
-	struct stat info;
-	if(stat(initPath.c_str(), &info) < 0 || stat(locPath.c_str(), &info) < 0)
+	if(access(initPath.c_str(), F_OK) < 0 || access(locPath.c_str(), F_OK) < 0)
 	{
 		gui_print("init paths do not exits\n");
 		return false;
 	}
 
-	char cmd[512];
-	sprintf(cmd, "cp -a \"%s/ubuntu-init/init\" \"%s\"", m_path.c_str(), initPath.c_str());
-	system(cmd);
-	sprintf(cmd, "cp -a \"%s/ubuntu-init/local\" \"%s\"", m_path.c_str(), locPath.c_str());
-	system(cmd);
+	system_args("cp -a \"%s/ubuntu-init/init\" \"%s\"", m_path.c_str(), initPath.c_str());
+	system_args("cp -a \"%s/ubuntu-init/local\" \"%s\"", m_path.c_str(), locPath.c_str());
 
-	sprintf(cmd, "echo \"none	 /proc 	proc 	nodev,noexec,nosuid 	0 	0\" > \"%s/etc/fstab\"", rootDir.c_str());
-	system(cmd);
+	system_args("echo \"none	 /proc 	proc 	nodev,noexec,nosuid 	0 	0\" > \"%s/etc/fstab\"", rootDir.c_str());
 	return true;
 }
 
 void MultiROM::setUpChroot(bool start, std::string rootDir)
 {
-	char cmd[512];
 	static const char *dirs[] = { "dev", "sys", "proc" };
 	for(size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); ++i)
 	{
 		if(start)
-			sprintf(cmd, "mount -o bind /%s \"%s/%s\"", dirs[i], rootDir.c_str(), dirs[i]);
+			system_args("mount -o bind /%s \"%s/%s\"", dirs[i], rootDir.c_str(), dirs[i]);
 		else
-			sprintf(cmd, "umount \"%s/%s\"", rootDir.c_str(), dirs[i]);
-		system(cmd);
+			system_args("umount \"%s/%s\"", rootDir.c_str(), dirs[i]);
 	}
 }
 
@@ -1648,20 +1670,15 @@ bool MultiROM::ubuntuUpdateInitramfs(std::string rootDir)
 
 	setUpChroot(true, rootDir);
 
-	char cmd[512];
-
-	sprintf(cmd, "chroot \"%s\" apt-get -y --force-yes purge ac100-tarball-installer flash-kernel", rootDir.c_str());
-	system(cmd);
+	system_args("chroot \"%s\" apt-get -y --force-yes purge ac100-tarball-installer flash-kernel", rootDir.c_str());
 
 	ubuntuDisableFlashKernel(false, rootDir);
 
 	gui_print("Updating initramfs...\n");
-	sprintf(cmd, "chroot \"%s\" update-initramfs -u", rootDir.c_str());
-	system(cmd);
+	system_args("chroot \"%s\" update-initramfs -u", rootDir.c_str());
 
 	// make proper link to initrd.img
-	sprintf(cmd, "chroot \"%s\" bash -c 'cd /boot; ln -sf $(ls initrd.img-* | head -n1) initrd.img'", rootDir.c_str());
-	system(cmd);
+	system_args("chroot \"%s\" bash -c 'cd /boot; ln -sf $(ls initrd.img-* | head -n1) initrd.img'", rootDir.c_str());
 
 	setUpChroot(false, rootDir);
 	return true;
@@ -1670,22 +1687,18 @@ bool MultiROM::ubuntuUpdateInitramfs(std::string rootDir)
 void MultiROM::ubuntuDisableFlashKernel(bool initChroot, std::string rootDir)
 {
 	gui_print("Disabling flash-kernel\n");
-	char cmd[512];
 	if(initChroot)
 	{
 		setUpChroot(true, rootDir);
-		sprintf(cmd, "chroot \"%s\" apt-get -y --force-yes purge flash-kernel", rootDir.c_str());
-		system(cmd);
+		system_args("chroot \"%s\" apt-get -y --force-yes purge flash-kernel", rootDir.c_str());
 	}
 
 	// We don't want flash-kernel to be active, ever.
-	sprintf(cmd, "chroot \"%s\" bash -c \"echo flash-kernel hold | dpkg --set-selections\"", rootDir.c_str());
-	system(cmd);
+	system_args("chroot \"%s\" bash -c \"echo flash-kernel hold | dpkg --set-selections\"", rootDir.c_str());
 
-	sprintf(cmd, "if [ \"$(grep FLASH_KERNEL_SKIP '%s/etc/environment')\" == \"\" ]; then "
+	system_args("if [ \"$(grep FLASH_KERNEL_SKIP '%s/etc/environment')\" == \"\" ]; then "
 			"chroot \"%s\" bash -c \"echo FLASH_KERNEL_SKIP=1 >> /etc/environment\"; fi;",
 			rootDir.c_str(), rootDir.c_str());
-	system(cmd);
 
 	if(initChroot)
 		setUpChroot(false, rootDir);
@@ -1731,13 +1744,14 @@ int MultiROM::getType(int os, std::string loc)
 			break;
 		case 3: // installer
 			return m_installer->getRomType();
-		case 4:
+		case 5: // SailfishOS
 			if(loc == INTERNAL_MEM_LOC_TXT)
-				return ROM_UTOUCH_INTERNAL;
-			else if(!images)
-				return ROM_UTOUCH_USB_DIR;
+				return ROM_SAILFISH_INTERNAL;
 			else
-				return ROM_UTOUCH_USB_IMG;
+			{
+				gui_print("Installation of SailfishOS to external memory is not supported at this time.\n");
+				return ROM_UNKNOWN;
+			}
 			break;
 	}
 	return ROM_UNKNOWN;
@@ -1881,31 +1895,29 @@ bool MultiROM::addROM(std::string zip, int os, std::string loc)
 				 umountBaseImages(base);
 			break;
 		}
-		case ROM_UTOUCH_INTERNAL:
-		case ROM_UTOUCH_USB_DIR:
-		case ROM_UTOUCH_USB_IMG:
+		case ROM_SAILFISH_INTERNAL:
 		{
-			std::string device_zip = DataManager::GetStrValue("tw_touch_filename_device");
-			std::string core_zip = DataManager::GetStrValue("tw_touch_filename_core");
+			std::string base_zip = DataManager::GetStrValue("tw_sailfish_filename_base");
+			std::string rootfs_zip = DataManager::GetStrValue("tw_sailfish_filename_rootfs");
 
 			gui_print("  \n");
-			gui_print("Flashing device zip...\n");
-			if(!flashZip(name, device_zip))
+			gui_print("Flashing base zip...\n");
+			if(!flashZip(name, base_zip))
 				break;
 
 			gui_print("  \n");
-			gui_print("Flashing core zip...\n");
+			gui_print("Flashing rootfs zip...\n");
 
 			system("ln -sf /sbin/gnutar /sbin/tar");
-			bool flash_res = flashZip(name, core_zip);
+			bool flash_res = flashZip(name, rootfs_zip);
 			system("ln -sf /sbin/busybox /sbin/tar");
 			if(!flash_res)
 				break;
 
-			if(!ubuntuTouchProcessBoot(root, "ubuntu-touch-init"))
+			if(!sailfishProcessBoot(root))
 				break;
 
-			if(!ubuntuTouchProcess(root, name))
+			if(!sailfishProcess(root, name))
 				break;
 
 			res = true;
@@ -1979,7 +1991,6 @@ bool MultiROM::patchInit(std::string name)
 bool MultiROM::installFromBackup(std::string name, std::string path, int type)
 {
 	struct stat info;
-	char cmd[256];
 	std::string base = getRomsPath() + "/" + name;
 	int has_system = 0, has_data = 0;
 
@@ -2012,8 +2023,7 @@ bool MultiROM::installFromBackup(std::string name, std::string path, int type)
 		return false;
 	}
 
-	sprintf(cmd, "cp \"%s/boot.emmc.win\" \"%s/boot.img\"", path.c_str(), base.c_str());
-	system(cmd);
+	system_args("cp \"%s/boot.emmc.win\" \"%s/boot.img\"", path.c_str(), base.c_str());
 
 	if(!extractBootForROM(base))
 		return false;
@@ -2029,81 +2039,23 @@ bool MultiROM::installFromBackup(std::string name, std::string path, int type)
 	if(path.find("/data/media") == 0)
 		path.replace(0, 5, REALDATA);
 
-	bool res = (extractBackupFile(path, "system") && (!has_data || extractBackupFile(path, "data")));
-	restoreMounts();
-	return res;
-}
-
-bool MultiROM::extractBackupFile(std::string path, std::string part)
-{
-	gui_print("Extracting backup of %s partition...\n", part.c_str());
-
-	struct stat info;
-	std::string filename;
-	std::string full_path;
-	int index = 0;
-	char split_index[5];
-	char cmd[256];
-	DIR *d;
-	struct dirent *dt;
-
-	d = opendir(path.c_str());
-	if(!d)
+	const int partCnt = has_data ? 2 : 1;
+	bool res = false;
+	TWPartition *sys_part = PartitionManager.Find_Partition_By_Path("/system");
+	TWPartition *data_part = PartitionManager.Find_Partition_By_Path("/data");
+	if(sys_part && data_part)
 	{
-		gui_print("Failed to list backup folder\n");
-		return false;
-	}
-
-	while((dt = readdir(d)))
-	{
-		if(strncmp(dt->d_name, part.c_str(), part.size()) == 0)
-		{
-			std::vector<std::string> tok = TWFunc::Split_String(dt->d_name, ".");
-			if(tok.size() < 3)
-				continue;
-			//         system  .    ext4      .win
-			filename = part + "." + tok[1] + ".win";
-			full_path = path + "/" + filename;
-			break;
-		}
-	}
-	closedir(d);
-
-	if(filename.empty())
-	{
-		gui_print("Failed to find backup's filesystem\n");
-		return false;
-	}
-
-	if (stat(full_path.c_str(), &info) < 0) // multiple archives
-	{
-		sprintf(split_index, "%03i", index);
-		full_path = path + "/" + filename + split_index;
-		while (stat(full_path.c_str(), &info) >= 0)
-		{
-			gui_print("Restoring archive #%i...\n", ++index);
-
-			sprintf(cmd, "cd / && gnutar -xf \"%s\"", full_path.c_str());
-			LOGINFO("Restore cmd: %s\n", cmd);
-			system(cmd);
-
-			sprintf(split_index, "%03i", index);
-			full_path = path + "/" + filename + split_index;
-		}
-
-		if (index == 0)
-		{
-			gui_print("Failed to locate backup file %s\n", full_path.c_str());
-			return false;
-		}
+		PartitionManager.Set_Restore_Files(path);
+		res = PartitionManager.Restore_Partition(sys_part, path, partCnt) &&
+				(!has_data || PartitionManager.Restore_Partition(data_part, path, partCnt));
 	}
 	else
 	{
-		sprintf(cmd, "cd /%s && gnutar -xf \"%s\"", part.c_str(), full_path.c_str());
-		LOGINFO("Restore cmd: %s\n", cmd);
-		system(cmd);
+		gui_print("Failed to find /system and /data partition!");
 	}
-	return true;
+
+	restoreMounts();
+	return res;
 }
 
 void MultiROM::setInstaller(MROMInstaller *i)
@@ -2355,6 +2307,73 @@ bool MultiROM::ubuntuTouchProcess(const std::string& root, const std::string& na
 	return true;
 }
 
+bool MultiROM::sailfishProcessBoot(const std::string& root)
+{
+	int rd_cmpr;
+	struct bootimg img;
+	bool res = false;
+
+	gui_print("Processing boot.img for SailfishOS\n");
+	system("rm /tmp/boot.img");
+	system_args("cp %s/boot.img /tmp/boot.img", root.c_str());
+
+	if(access("/tmp/boot.img", F_OK) < 0)
+	{
+		gui_print("boot.img was not found!\n");
+		return false;
+	}
+
+	// EXTRACT BOOTIMG
+	gui_print("Extracting boot image...\n");
+	system("rm -r /tmp/boot; mkdir /tmp/boot");
+
+	if (libbootimg_init_load(&img, "/tmp/boot.img", LIBBOOTIMG_LOAD_ALL) < 0 ||
+		libbootimg_dump_ramdisk(&img, "/tmp/boot/initrd.img") < 0 ||
+		libbootimg_dump_kernel(&img, "/tmp/boot/zImage") < 0)
+	{
+		gui_print("Failed to unpack boot img!\n");
+		goto fail_inject;
+	}
+
+	// DEPLOY
+	system_args("cp /tmp/boot/initrd.img %s/initrd.img", root.c_str());
+	system_args("cp /tmp/boot/zImage %s/zImage", root.c_str());
+
+	res = true;
+fail_inject:
+	system("rm /tmp/boot.img");
+	system("rm -r /tmp/boot");
+	libbootimg_destroy(&img);
+	return res;
+}
+
+bool MultiROM::sailfishProcess(const std::string& root, const std::string& name)
+{
+	char buff[256];
+
+	// rom_info.txt
+	if(system_args("cp %s/infos/sailfishos.txt \"%s/rom_info.txt\"", m_path.c_str(), root.c_str()) != 0)
+	{
+		gui_print("Failed to copy rom_info.txt!\n");
+		return false;
+	}
+
+	// Disable /system mounting
+	snprintf(buff, sizeof(buff), "%s/data/.stowaways/sailfishos/etc/systemd/system/local-fs.target.wants/system.mount", root.c_str());
+	remove(buff);
+	snprintf(buff, sizeof(buff), "%s/data/.stowaways/sailfishos/sailfishos/lib/systemd/system/system.mount", root.c_str());
+	remove(buff);
+
+	// Move /system to the rootfs
+	snprintf(buff, sizeof(buff), "%s/system", root.c_str());
+	if(access(buff, F_OK) >= 0 && system_args("mv \"%s/system\" \"%s/data/.stowaways/sailfishos/\"", root.c_str(), root.c_str()) != 0)
+	{
+		gui_print("Failed to move the /system to rootfs\n");
+		return false;
+	}
+	return true;
+}
+
 int MultiROM::system_args(const char *fmt, ...)
 {
 	int ret;
@@ -2602,6 +2621,9 @@ void MultiROM::executeCacheScripts()
 		return;
 	}
 
+	DataManager::SetValue("multirom_rom_name_title", 1);
+	DataManager::SetValue("tw_multirom_rom_name", script.name);
+
 	if(script.type & MASK_ANDROID)
 	{
 		DataManager::SetValue(TW_ORS_IS_SECONDARY_ROM, 1);
@@ -2640,6 +2662,8 @@ void MultiROM::executeCacheScripts()
 		usleep(2000000); // Sleep for 2 seconds before rebooting
 		TWFunc::tw_reboot(rb_system);
 	}
+
+	DataManager::SetValue("multirom_rom_name_title", 0);
 }
 
 void MultiROM::startSystemImageUpgrader()
@@ -2662,7 +2686,7 @@ bool MultiROM::copyPartWithXAttrs(const std::string& src, const std::string& dst
 	if(!skipMedia)
 	{
 		gui_print("Copying /%s...\n", part.c_str());
-		if(system_args("cp -a \"%s/%s/\"* \"%s/%s/\"", src.c_str(), part.c_str(), dst.c_str(), part.c_str()) != 0)
+		if(system_args("IFS=$'\n'; for f in $(find \"%s/%s\" -maxdepth 1 -mindepth 1); do cp -a \"$f\" \"%s/%s/\"; done", src.c_str(), part.c_str(), dst.c_str(), part.c_str()) != 0)
 		{
 			LOGERR("Copying failed, see log for more info!\n");
 			return false;

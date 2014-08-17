@@ -56,9 +56,11 @@ public:
 	bool Is_Mounted();                                                        // Checks mount to see if the partition is currently mounted
 	bool Mount(bool Display_Error);                                           // Mounts the partition if it is not mounted
 	bool UnMount(bool Display_Error);                                         // Unmounts the partition if it is mounted
-	bool Wipe(string New_File_System, bool Force_Format = false);             // Wipes the partition
+	bool Wipe(string New_File_System);                                        // Wipes the partition
 	bool Wipe();                                                              // Wipes the partition
 	bool Wipe_AndSec();                                                       // Wipes android secure
+	bool Can_Repair();                                                        // Checks to see if we have everything needed to be able to repair the current file system
+	bool Repair();                                                            // Repairs the current file system
 	bool Backup(string backup_folder);                                        // Backs up the partition to the folder specified
 	bool Check_MD5(string restore_folder);                                    // Checks MD5 of a backup
 	bool Restore(string restore_folder);                                      // Restores the partition using the backup folder provided
@@ -168,6 +170,7 @@ private:
 friend class TWPartitionManager;
 friend class DataManager;
 friend class GUIPartitionList;
+friend class GUIAction;
 friend class MultiROM;
 };
 
@@ -197,11 +200,15 @@ public:
 	TWPartition* Find_Partition_By_Name(string Block);                        // Returns a pointer to a partition based on name
 	int Check_Backup_Name(bool Display_Error);                                // Checks the current backup name to ensure that it is valid
 	int Run_Backup();                                                         // Initiates a backup in the current storage
+	bool Restore_Partition(TWPartition* Part, string Restore_Name, int partition_count);
 	int Run_Restore(string Restore_Name);                                     // Restores a backup
 	void Set_Restore_Files(string Restore_Name);                              // Used to gather a list of available backup partitions for the user to select for a restore
 	int Wipe_By_Path(string Path);                                            // Wipes a partition based on path
 	int Wipe_By_Block(string Block);                                          // Wipes a partition based on block device
 	int Wipe_By_Name(string Name);                                            // Wipes a partition based on display name
+	int Wipe_By_Path(string Path, string New_File_System);                    // Wipes a partition based on path
+	int Wipe_By_Block(string Block, string New_File_System);                  // Wipes a partition based on block device
+	int Wipe_By_Name(string Name, string New_File_System);                    // Wipes a partition based on display name
 	int Factory_Reset();                                                      // Performs a factory reset
 	int Wipe_Dalvik_Cache();                                                  // Wipes dalvik cache
 	int Wipe_Rotate_Data();                                                   // Wipes rotation data --
@@ -209,6 +216,9 @@ public:
 	int Wipe_Android_Secure();                                                // Wipes android secure
 	int Format_Data();                                                        // Really formats data on /data/media devices -- also removes encryption
 	int Wipe_Media_From_Data();                                               // Removes and recreates the media folder on /data/media devices
+	int Repair_By_Path(string Path, bool Display_Error);                      // Repairs a partition based on path
+	int Repair_By_Block(string Block, bool Display_Error);                    // Repairs a partition based on block device
+	int Repair_By_Name(string Name, bool Display_Error);                      // Repairs a partition based on display name
 	void Refresh_Sizes();                                                     // Refreshes size data of partitions
 	void Update_System_Details();                                             // Updates fstab, file systems, sizes, etc.
 	int Decrypt_Device(string Password);                                      // Attempt to decrypt any encrypted partitions
@@ -217,7 +227,7 @@ public:
 	void Mount_All_Storage(void);                                             // Mounts all storage locations
 	void UnMount_Main_Partitions(void);                                       // Unmounts system and data if not data/media and boot if boot is mountable
 	int Partition_SDCard(void);                                               // Repartitions the sdcard
-	TWPartition *Get_First_Storage_Partition();                               // Returns a pointer to first partition with Is_Storage
+	TWPartition *Get_Default_Storage_Partition();                             // Returns a pointer to a default storage partition
 
 	int Fix_Permissions();
 	void Get_Partition_List(string ListType, std::vector<PartitionList> *Partition_List);
@@ -236,7 +246,6 @@ private:
 	void Setup_Android_Secure_Location(TWPartition* Part);                    // Sets up .android_secure if needed
 	bool Make_MD5(bool generate_md5, string Backup_Folder, string Backup_Filename); // Generates an MD5 after a backup is made
 	bool Backup_Partition(TWPartition* Part, string Backup_Folder, bool generate_md5, unsigned long long* img_bytes_remaining, unsigned long long* file_bytes_remaining, unsigned long *img_time, unsigned long *file_time, unsigned long long *img_bytes, unsigned long long *file_bytes);
-	bool Restore_Partition(TWPartition* Part, string Restore_Name, int partition_count);
 	void Output_Partition(TWPartition* Part);
 	TWPartition* Find_Next_Storage(string Path, string Exclude);
 	int Open_Lun_File(string Partition_Path, string Lun_File);
