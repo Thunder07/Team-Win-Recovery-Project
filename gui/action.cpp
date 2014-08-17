@@ -850,10 +850,12 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		}
 	}
 
+
+
 	if (function == "multirom_add_file_selected")
 	{
 		std::string loc = DataManager::GetStrValue("tw_multirom_install_loc");
-		bool images = MultiROM::installLocNeedsImages(loc);
+		bool images = true;//MultiROM::installLocNeedsImages(loc);
 		int type = DataManager::GetIntValue("tw_multirom_type");
 
 		MultiROM::clearBaseFolders();

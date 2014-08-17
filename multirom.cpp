@@ -2426,7 +2426,7 @@ void MultiROM::restoreBootPartition()
 	}
 
 	system_args("rm \"%s\"", m_boot_dev.c_str());
-	system_args("mv \"%s\"-orig \"%s\"", m_boot_dev.c_str(), m_boot_dev.c_str());
+	system_args("mv \"%s-orig\" \"%s\"", m_boot_dev.c_str(), m_boot_dev.c_str());
 	remove("/tmp/mrom_fakebootpart");
 }
 
@@ -2447,7 +2447,7 @@ void MultiROM::failsafeCheckBootPartition()
 	gui_print("Restoring original boot device!\nRecovery has probably crashed in the middle of MultiROM operation.\n");
 
 	system_args("rm \"%s\"", dev.c_str());
-	system_args("mv \"%s\"-orig \"%s\"", dev.c_str(), dev.c_str());
+	system_args("mv \"%s-orig\" \"%s\"", dev.c_str(), dev.c_str());
 	remove("/tmp/mrom_fakebootpart");
 }
 
