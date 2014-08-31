@@ -118,9 +118,7 @@ void MultiROM::findPath()
 	m_has_firmware = (fw && fw->Current_File_System == "vfat");
 
 	static const char *paths[] = {
-		"/data/media/multirom",
 		"/sdcard/media/0/multirom",
-		"/data/media/0/multirom",
 		NULL
 	};
 
