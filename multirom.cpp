@@ -119,6 +119,8 @@ void MultiROM::findPath()
 
 	static const char *paths[] = {
 		"/sdcard/media/0/multirom",
+		"/data/media/0/multirom",
+		"/data/media/multirom",
 		NULL
 	};
 
