@@ -59,6 +59,7 @@
 // #define PRINT_SCREENINFO 1 // Enables printing of screen info to log
 
 typedef struct {
+    int type;
     GGLSurface texture;
     unsigned offset[97];
     unsigned cheight;
@@ -69,7 +70,7 @@ static GRFont *gr_font = 0;
 static GGLContext *gr_context = 0;
 static GGLSurface gr_font_texture;
 static GGLSurface gr_framebuffer[NUM_BUFFERS];
-static GGLSurface gr_mem_surface;
+GGLSurface gr_mem_surface;
 static unsigned gr_active_fb = 0;
 static unsigned double_buffering = 0;
 static int gr_is_curr_clr_opaque = 0;
@@ -80,7 +81,7 @@ static int gr_freeze = 0;
 static int gr_fb_fd = -1;
 static int gr_vt_fd = -1;
 
-static struct fb_var_screeninfo vi;
+struct fb_var_screeninfo vi;
 static struct fb_fix_screeninfo fi;
 
 static bool has_overlay = false;
@@ -303,10 +304,10 @@ static int get_framebuffer(GGLSurface *fb)
     fb->height = vi.yres;
 #ifdef BOARD_HAS_JANKY_BACKBUFFER
     fb->stride = fi.line_length/2;
-    fb->data = (void*) (((unsigned) bits) + vi.yres * fi.line_length);
+    fb->data = (GGLubyte*) (((unsigned long) bits) + vi.yres * fi.line_length);
 #else
     fb->stride = vi.xres_virtual;
-    fb->data = (void*) (((unsigned) bits) + vi.yres * fb->stride * PIXEL_SIZE);
+    fb->data = (GGLubyte*) (((unsigned long) bits) + vi.yres * fb->stride * PIXEL_SIZE);
 #endif
     fb->format = PIXEL_FORMAT;
     if (!has_overlay) {
@@ -403,6 +404,11 @@ int gr_measureEx(const char *s, void* font)
 
     if (!fnt)   fnt = gr_font;
 
+#ifndef TW_DISABLE_TTF
+    if(fnt->type == FONT_TYPE_TTF)
+        return gr_ttf_measureEx(s, font);
+#endif
+
     while ((off = *s++))
     {
         off -= 32;
@@ -421,6 +427,11 @@ int gr_maxExW(const char *s, void* font, int max_width)
 
     if (!fnt)   fnt = gr_font;
 
+#ifndef TW_DISABLE_TTF
+    if(fnt->type == FONT_TYPE_TTF)
+        return gr_ttf_maxExW(s, font, max_width);
+#endif
+
     while ((off = *s++))
     {
         off -= 32;
@@ -436,21 +447,6 @@ int gr_maxExW(const char *s, void* font, int max_width)
     return total;
 }
 
-unsigned character_width(const char *s, void* pFont)
-{
-	GRFont *font = (GRFont*) pFont;
-	unsigned off;
-
-	/* Handle default font */
-    if (!font)  font = gr_font;
-
-	off = *s - 32;
-	if (off == 0)
-		return 0;
-
-	return font->offset[off+1] - font->offset[off];
-}
-
 int gr_textEx(int x, int y, const char *s, void* pFont)
 {
     GGLContext *gl = gr_context;
@@ -460,6 +456,11 @@ int gr_textEx(int x, int y, const char *s, void* pFont)
 
     /* Handle default font */
     if (!font)  font = gr_font;
+
+#ifndef TW_DISABLE_TTF
+    if(font->type == FONT_TYPE_TTF)
+        return gr_ttf_textExWH(gl, x, y, s, pFont, -1, -1);
+#endif
 
     gl->bindTexture(gl, &font->texture);
     gl->texEnvi(gl, GGL_TEXTURE_ENV, GGL_TEXTURE_ENV_MODE, GGL_REPLACE);
@@ -490,6 +491,11 @@ int gr_textExW(int x, int y, const char *s, void* pFont, int max_width)
 
     /* Handle default font */
     if (!font)  font = gr_font;
+
+#ifndef TW_DISABLE_TTF
+    if(font->type == FONT_TYPE_TTF)
+        return gr_ttf_textExWH(gl, x, y, s, pFont, max_width, -1);
+#endif
 
     gl->bindTexture(gl, &font->texture);
     gl->texEnvi(gl, GGL_TEXTURE_ENV, GGL_TEXTURE_ENV_MODE, GGL_REPLACE);
@@ -529,6 +535,11 @@ int gr_textExWH(int x, int y, const char *s, void* pFont, int max_width, int max
     /* Handle default font */
     if (!font)  font = gr_font;
 
+#ifndef TW_DISABLE_TTF
+    if(font->type == FONT_TYPE_TTF)
+        return gr_ttf_textExWH(gl, x, y, s, pFont, max_width, max_height);
+#endif
+
     gl->bindTexture(gl, &font->texture);
     gl->texEnvi(gl, GGL_TEXTURE_ENV, GGL_TEXTURE_ENV_MODE, GGL_REPLACE);
     gl->texGeni(gl, GGL_S, GGL_TEXTURE_GEN_MODE, GGL_ONE_TO_ONE);
@@ -555,34 +566,6 @@ int gr_textExWH(int x, int y, const char *s, void* pFont, int max_width, int max
 			if (x > max_width)
 				return x;
         }
-    }
-
-    return x;
-}
-
-int twgr_text(int x, int y, const char *s)
-{
-    GGLContext *gl = gr_context;
-    GRFont *font = gr_font;
-    unsigned off;
-    unsigned cwidth = 0;
-
-    y -= font->ascent;
-
-    gl->bindTexture(gl, &font->texture);
-    gl->texEnvi(gl, GGL_TEXTURE_ENV, GGL_TEXTURE_ENV_MODE, GGL_REPLACE);
-    gl->texGeni(gl, GGL_S, GGL_TEXTURE_GEN_MODE, GGL_ONE_TO_ONE);
-    gl->texGeni(gl, GGL_T, GGL_TEXTURE_GEN_MODE, GGL_ONE_TO_ONE);
-    gl->enable(gl, GGL_TEXTURE_2D);
-
-    while((off = *s++)) {
-        off -= 32;
-        if (off < 96) {
-            cwidth = font->offset[off+1] - font->offset[off];
-            gl->texCoord2i(gl, (off * cwidth) - x, 0 - y);
-            gl->recti(gl, x, y, x + cwidth, y + font->cheight);
-        }
-        x += cwidth;
     }
 
     return x;
@@ -699,33 +682,32 @@ void* gr_loadFont(const char* fontName)
     ftex->stride = width;
     ftex->data = (void*) bits;
     ftex->format = GGL_PIXEL_FORMAT_A_8;
+    font->type = FONT_TYPE_TWRP;
     font->cheight = height;
     font->ascent = height - 2;
     return (void*) font;
 }
 
-int gr_getFontDetails(void* font, unsigned* cheight, unsigned* maxwidth)
+void gr_freeFont(void *font)
+{
+    GRFont *f = font;
+    free(f->texture.data);
+    free(f);
+}
+
+int gr_getMaxFontHeight(void *font)
 {
     GRFont *fnt = (GRFont*) font;
 
     if (!fnt)   fnt = gr_font;
     if (!fnt)   return -1;
 
-    if (cheight)    *cheight = fnt->cheight;
-    if (maxwidth)
-    {
-        int pos;
-        *maxwidth = 0;
-        for (pos = 0; pos < 96; pos++)
-        {
-            unsigned int width = fnt->offset[pos+1] - fnt->offset[pos];
-            if (width > *maxwidth)
-            {
-                *maxwidth = width;
-            }
-        }
-    }
-    return 0;
+#ifndef TW_DISABLE_TTF
+    if(fnt->type == FONT_TYPE_TTF)
+        return gr_ttf_getMaxFontHeight(font);
+#endif
+
+    return fnt->cheight;
 }
 
 static void gr_init_font(void)
@@ -763,6 +745,7 @@ static void gr_init_font(void)
     ftex->stride = width;
     ftex->data = (void*) bits;
     ftex->format = GGL_PIXEL_FORMAT_A_8;
+    gr_font->type = FONT_TYPE_TWRP;
     gr_font->cheight = height;
     gr_font->ascent = height - 2;
     return;
@@ -806,8 +789,11 @@ int gr_init(void)
     gl->enable(gl, GGL_BLEND);
     gl->blendFunc(gl, GGL_SRC_ALPHA, GGL_ONE_MINUS_SRC_ALPHA);
 
-//    gr_fb_blank(true);
-//    gr_fb_blank(false);
+#ifdef TW_SCREEN_BLANK_ON_BOOT
+    printf("TW_SCREEN_BLANK_ON_BOOT := true\n");
+    gr_fb_blank(true);
+    gr_fb_blank(false);
+#endif
 
     if (!alloc_ion_mem(fi.line_length * vi.yres))
         allocate_overlay(gr_fb_fd, gr_framebuffer);
@@ -860,16 +846,16 @@ gr_pixel *gr_fb_data(void)
 int gr_fb_blank(int blank)
 {
     int ret;
-    if (blank)
-        free_overlay(gr_fb_fd);
+    //if (blank)
+        //free_overlay(gr_fb_fd);
 
     ret = ioctl(gr_fb_fd, FBIOBLANK, blank ? FB_BLANK_POWERDOWN : FB_BLANK_UNBLANK);
     if (ret < 0)
         perror("ioctl(): blank");
 
-    if (!blank)
-        allocate_overlay(gr_fb_fd, gr_framebuffer);
-	return ret;
+    //if (!blank)
+        //allocate_overlay(gr_fb_fd, gr_framebuffer);
+    return ret;
 }
 
 int gr_get_surface(gr_surface* surface)
@@ -901,87 +887,6 @@ int gr_free_surface(gr_surface surface)
 void gr_write_frame_to_file(int fd)
 {
     write(fd, gr_mem_surface.data, vi.xres * vi.yres * vi.bits_per_pixel / 8);
-}
-
-int gr_save_screenshot(const char *dest)
-{
-    uint32_t y, stride_bytes;
-    int res = -1;
-    GGLContext *gl = NULL;
-    GGLSurface surface;
-    uint8_t * volatile img_data = NULL;
-    uint8_t *ptr;
-    FILE *fp = NULL;
-    png_structp png_ptr = NULL;
-    png_infop info_ptr = NULL;
-
-    fp = fopen(dest, "wb");
-    if(!fp)
-        goto exit;
-
-    img_data = malloc(vi.xres * vi.yres * 3);
-    surface.version = sizeof(surface);
-    surface.width = gr_mem_surface.width;
-    surface.height = gr_mem_surface.height;
-    surface.stride = gr_mem_surface.width;
-    surface.data = img_data;
-    surface.format = GGL_PIXEL_FORMAT_RGB_888;
-
-    gglInit(&gl);
-    gl->colorBuffer(gl, &surface);
-    gl->activeTexture(gl, 0);
-
-    gl->bindTexture(gl, &gr_mem_surface);
-    gl->texEnvi(gl, GGL_TEXTURE_ENV, GGL_TEXTURE_ENV_MODE, GGL_REPLACE);
-    gl->texGeni(gl, GGL_S, GGL_TEXTURE_GEN_MODE, GGL_ONE_TO_ONE);
-    gl->texGeni(gl, GGL_T, GGL_TEXTURE_GEN_MODE, GGL_ONE_TO_ONE);
-    gl->enable(gl, GGL_TEXTURE_2D);
-    gl->texCoord2i(gl, 0, 0);
-    gl->recti(gl, 0, 0, gr_mem_surface.width, gr_mem_surface.height);
-
-    gglUninit(gl);
-    gl = NULL;
-
-    png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png_ptr)
-        goto exit;
-
-    info_ptr = png_create_info_struct(png_ptr);
-    if (info_ptr == NULL)
-        goto exit;
-
-    if (setjmp(png_jmpbuf(png_ptr)))
-        goto exit;
-
-    png_init_io(png_ptr, fp);
-    png_set_IHDR(png_ptr, info_ptr, surface.width, surface.height,
-         8, PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
-         PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
-    png_write_info(png_ptr, info_ptr);
-
-    ptr = img_data;
-    stride_bytes = surface.width*3;
-    for(y = 0; y < surface.height; ++y)
-    {
-        png_write_row(png_ptr, ptr);
-        ptr += stride_bytes;
-    }
-
-    png_write_end(png_ptr, NULL);
-
-    res = 0;
-exit:
-    if(info_ptr)
-        png_free_data(png_ptr, info_ptr, PNG_FREE_ALL, -1);
-    if(png_ptr)
-        png_destroy_write_struct(&png_ptr, (png_infopp)NULL);
-    if(gl)
-        gglUninit(gl);
-    if(img_data)
-        free(img_data);
-    if(fp)
-        fclose(fp);
-    return res;
 }
 
 void gr_set_rotation(int rot)

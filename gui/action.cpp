@@ -1,4 +1,4 @@
-/*
+/*update
 	Copyright 2013 bigbiff/Dees_Troy TeamWin
 	This file is part of TWRP/TeamWin Recovery Project.
 
@@ -57,6 +57,7 @@ extern "C" {
 #include "../twinstall.h"
 #include "cutils/properties.h"
 #include "../minadbd/adb.h"
+#include "../adb_install.h"
 
 #include "../mrominstaller.h"
 
@@ -226,33 +227,8 @@ int GUIAction::flash_zip(std::string filename, std::string pageName, const int s
 	if (!PartitionManager.Mount_By_Path(filename, true))
 		return -1;
 
-	if (mzOpenZipArchive(filename.c_str(), &zip))
-	{
-		LOGERR("Unable to open zip file.\n");
-		return -1;
-	}
+	gui_changePage(pageName);
 
-	// Check the zip to see if it has a custom installer theme
-	const ZipEntry* twrp = mzFindZipEntry(&zip, "META-INF/teamwin/twrp.zip");
-	if (twrp != NULL)
-	{
-		unlink("/tmp/twrp.zip");
-		fd = creat("/tmp/twrp.zip", 0666);
-	}
-	if (fd >= 0 && twrp != NULL &&
-		mzExtractZipEntryToFile(&zip, twrp, fd) &&
-		!PageManager::LoadPackage("install", "/tmp/twrp.zip", "main"))
-	{
-		mzCloseZipArchive(&zip);
-		PageManager::SelectPackage("install");
-		gui_changePage("main");
-	}
-	else
-	{
-		// In this case, we just use the default page
-		mzCloseZipArchive(&zip);
-		gui_changePage(pageName);
-	}
 	if (fd >= 0)
 		close(fd);
 
@@ -828,6 +804,11 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		return 0;
 	}
 
+	if (function == "setbrightness")
+	{
+		return TWFunc::Set_Brightness(arg);
+	}
+
 	if (function == "multirom")
 	{
 		if(MultiROM::folderExists())
@@ -852,7 +833,9 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 
 	if (function == "multirom_rename")
 	{
-		MultiROM::move(DataManager::GetStrValue("tw_multirom_rom_name"), arg);
+		std::string new_name = arg;
+		TWFunc::trim(new_name);
+		MultiROM::move(DataManager::GetStrValue("tw_multirom_rom_name"), new_name);
 		return gui_changePage("multirom_list");
 	}
 
@@ -881,14 +864,21 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 	if (function == "multirom_settings")
 	{
 		MultiROM::config cfg = MultiROM::loadConfig();
-		DataManager::SetValue("tw_multirom_enable_auto_boot", cfg.auto_boot_seconds > 0);
+
+		if(cfg.auto_boot_type & MROM_AUTOBOOT_CHECK_KEYS)
+			DataManager::SetValue("tw_multirom_auto_boot_trigger", MROM_AUTOBOOT_TRIGGER_KEYS);
+		else if(cfg.auto_boot_seconds > 0)
+			DataManager::SetValue("tw_multirom_auto_boot_trigger", MROM_AUTOBOOT_TRIGGER_TIME);
+		else
+			DataManager::SetValue("tw_multirom_auto_boot_trigger", MROM_AUTOBOOT_TRIGGER_DISABLED);
+
 		if(cfg.auto_boot_seconds <= 0)
 			DataManager::SetValue("tw_multirom_delay", 5);
 		else
 			DataManager::SetValue("tw_multirom_delay", cfg.auto_boot_seconds);
 		DataManager::SetValue("tw_multirom_current", cfg.current_rom);
 		DataManager::SetValue("tw_multirom_auto_boot_rom", cfg.auto_boot_rom);
-		DataManager::SetValue("tw_multirom_auto_boot_type", cfg.auto_boot_type);
+		DataManager::SetValue("tw_multirom_auto_boot_type", (cfg.auto_boot_type & MROM_AUTOBOOT_LAST));
 		DataManager::SetValue("tw_multirom_colors", cfg.colors);
 		DataManager::SetValue("tw_multirom_brightness", cfg.brightness);
 		DataManager::SetValue("tw_multirom_enable_adb", cfg.enable_adb);
@@ -908,12 +898,20 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 	{
 		MultiROM::config cfg;
 		cfg.current_rom = DataManager::GetStrValue("tw_multirom_current");
-		if(DataManager::GetIntValue("tw_multirom_enable_auto_boot"))
-			cfg.auto_boot_seconds = DataManager::GetIntValue("tw_multirom_delay");
-		else
-			cfg.auto_boot_seconds = 0;
-		cfg.auto_boot_rom = DataManager::GetStrValue("tw_multirom_auto_boot_rom");
 		cfg.auto_boot_type = DataManager::GetIntValue("tw_multirom_auto_boot_type");
+		switch(DataManager::GetIntValue("tw_multirom_auto_boot_trigger"))
+		{
+			case MROM_AUTOBOOT_TRIGGER_DISABLED:
+				cfg.auto_boot_seconds = 0;
+				break;
+			case MROM_AUTOBOOT_TRIGGER_TIME:
+				cfg.auto_boot_seconds = DataManager::GetIntValue("tw_multirom_delay");
+				break;
+			case MROM_AUTOBOOT_TRIGGER_KEYS:
+				cfg.auto_boot_type |= MROM_AUTOBOOT_CHECK_KEYS;
+				break;
+		}
+		cfg.auto_boot_rom = DataManager::GetStrValue("tw_multirom_auto_boot_rom");
 		cfg.colors = DataManager::GetIntValue("tw_multirom_colors");
 		cfg.brightness = DataManager::GetIntValue("tw_multirom_brightness");
 		cfg.enable_adb = DataManager::GetIntValue("tw_multirom_enable_adb");
@@ -1562,7 +1560,9 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 				DataManager::SetValue("tw_filename", zip_queue[i]);
 				DataManager::SetValue(TW_ZIP_INDEX, (i + 1));
 
+				TWFunc::SetPerformanceMode(true);
 				ret_val = flash_zip(zip_queue[i], arg, simulate, &wipe_cache);
+				TWFunc::SetPerformanceMode(false);
 				if (ret_val != 0) {
 					gui_print("Error flashing zip '%s'\n", zip_queue[i].c_str());
 					i = 10; // Error flashing zip - exit queue
@@ -1996,32 +1996,43 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 			} else {
 				int wipe_cache = 0;
 				int wipe_dalvik = 0;
-				string Sideload_File;
 
-				if (!PartitionManager.Mount_Current_Storage(false)) {
-					gui_print("Using RAM for sideload storage.\n");
-					Sideload_File = "/tmp/sideload.zip";
-				} else {
-					Sideload_File = DataManager::GetCurrentStoragePath() + "/sideload.zip";
-				}
-				if (TWFunc::Path_Exists(Sideload_File)) {
-					unlink(Sideload_File.c_str());
-				}
 				gui_print("Starting ADB sideload feature...\n");
 				DataManager::GetValue("tw_wipe_dalvik", wipe_dalvik);
-				ret = apply_from_adb(Sideload_File.c_str());
+				ret = apply_from_adb("/");
 				DataManager::SetValue("tw_has_cancel", 0); // Remove cancel button from gui now that the zip install is going to start
+				char file_prop[PROPERTY_VALUE_MAX];
+				property_get("tw_sideload_file", file_prop, "error");
 				if (ret != 0) {
 					ret = 1; // failure
-				} else if (TWinstall_zip(Sideload_File.c_str(), &wipe_cache) == 0) {
-					if (wipe_cache || DataManager::GetIntValue("tw_wipe_cache"))
-						PartitionManager.Wipe_By_Path("/cache");
-					if (wipe_dalvik)
-						PartitionManager.Wipe_Dalvik_Cache();
+					if (ret == -2)
+						gui_print("You need adb 1.0.32 or newer to sideload to this device.\n");
 				} else {
-					ret = 1; // failure
+					if (TWinstall_zip(file_prop, &wipe_cache) == 0) {
+						if (wipe_cache || DataManager::GetIntValue("tw_wipe_cache"))
+							PartitionManager.Wipe_By_Path("/cache");
+						if (wipe_dalvik)
+							PartitionManager.Wipe_Dalvik_Cache();
+					} else {
+						ret = 1; // failure
+					}
+					set_usb_driver(false);
+					maybe_restart_adbd();
 				}
-				PartitionManager.Update_System_Details();
+				if (strcmp(file_prop, "error") != 0) {
+					struct stat st;
+					stat("/sideload/exit", &st);
+					int child_pid, status;
+					char child_prop[PROPERTY_VALUE_MAX];
+					property_get("tw_child_pid", child_prop, "error");
+					if (strcmp(child_prop, "error") == 0) {
+						LOGERR("Unable to get child ID from prop\n");
+					} else {
+						child_pid = atoi(child_prop);
+						LOGINFO("Waiting for child sideload process to exit.\n");
+						waitpid(child_pid, &status, 0);
+					}
+				}
 				if (DataManager::GetIntValue(TW_HAS_INJECTTWRP) == 1 && DataManager::GetIntValue(TW_INJECT_AFTER_ZIP) == 1) {
 					operation_start("ReinjectTWRP");
 					gui_print("Injecting TWRP into boot image...\n");
@@ -2049,18 +2060,19 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 		}
 		if (function == "adbsideloadcancel")
 		{
-			int child_pid;
+			int child_pid, status;
 			char child_prop[PROPERTY_VALUE_MAX];
-			string Sideload_File;
-			Sideload_File = DataManager::GetCurrentStoragePath() + "/sideload.zip";
-			unlink(Sideload_File.c_str());
+			struct stat st;
+			DataManager::SetValue("tw_has_cancel", 0); // Remove cancel button from gui
+			gui_print("Cancelling ADB sideload...\n");
+			stat("/sideload/exit", &st);
+			sleep(1);
 			property_get("tw_child_pid", child_prop, "error");
 			if (strcmp(child_prop, "error") == 0) {
 				LOGERR("Unable to get child ID from prop\n");
 				return 0;
 			}
 			child_pid = atoi(child_prop);
-			gui_print("Cancelling ADB sideload...\n");
 			kill(child_pid, SIGTERM);
 			DataManager::SetValue("tw_page_done", "1"); // For OpenRecoveryScript support
 			return 0;
@@ -2138,10 +2150,12 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 				DataManager::GetValue("tw_restore", Restore_Path);
 				Restore_Path += "/";
 				DataManager::GetValue("tw_restore_password", Password);
+				TWFunc::SetPerformanceMode(true);
 				if (TWFunc::Try_Decrypting_Backup(Restore_Path, Password))
 					op_status = 0; // success
 				else
 					op_status = 1; // fail
+				TWFunc::SetPerformanceMode(false);
 			}
 
 			operation_end(op_status, simulate);
@@ -2186,6 +2200,32 @@ int GUIAction::doAction(Action action, int isThreaded /* = 0 */)
 					op_status = 1; // fail
 				}
 			}
+			PartitionManager.Update_System_Details();
+			operation_end(op_status, simulate);
+			return 0;
+		}
+		if (function == "startmtp")
+		{
+			int op_status = 0;
+
+			operation_start("Start MTP");
+			if (PartitionManager.Enable_MTP())
+				op_status = 0; // success
+			else
+				op_status = 1; // fail
+
+			operation_end(op_status, simulate);
+			return 0;
+		}
+		if (function == "stopmtp")
+		{
+			int op_status = 0;
+
+			operation_start("Stop MTP");
+			if (PartitionManager.Disable_MTP())
+				op_status = 0; // success
+			else
+				op_status = 1; // fail
 
 			operation_end(op_status, simulate);
 			return 0;

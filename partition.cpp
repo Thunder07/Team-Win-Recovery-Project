@@ -41,6 +41,7 @@
 #include "twrpTar.hpp"
 #include "twrpDU.hpp"
 #include "fixPermissions.hpp"
+#include "infomanager.hpp"
 extern "C" {
 	#include "mtdutils/mtdutils.h"
 	#include "mtdutils/mounts.h"
@@ -54,6 +55,8 @@ extern "C" {
 #ifdef TW_INCLUDE_CRYPTO
 	#ifdef TW_INCLUDE_JB_CRYPTO
 		#include "crypto/jb/cryptfs.h"
+	#elif defined(TW_INCLUDE_L_CRYPTO)
+		#include "crypto/lollipop/cryptfs.h"
 	#else
 		#include "crypto/ics/cryptfs.h"
 	#endif
@@ -72,6 +75,7 @@ extern "C" {
 using namespace std;
 
 extern struct selabel_handle *selinux_handle;
+extern bool datamedia;
 
 struct flag_list {
 	const char *name;
@@ -292,27 +296,8 @@ bool TWPartition::Process_Fstab_Line(string Line, bool Display_Error) {
 			Can_Be_Backed_Up = true;
 			Can_Encrypt_Backup = true;
 			Use_Userdata_Encryption = true;
-#ifdef RECOVERY_SDCARD_ON_DATA
-			Storage_Name = "Internal Storage";
-			Has_Data_Media = true;
-			Is_Storage = true;
-			Is_Settings_Storage = true;
-			Storage_Path = "/data/media";
-			Symlink_Path = Storage_Path;
-			if (strcmp(EXPAND(TW_EXTERNAL_STORAGE_PATH), "/sdcard") == 0) {
-				Make_Dir("/emmc", Display_Error);
-				Symlink_Mount_Point = "/emmc";
-			} else {
-				Make_Dir("/sdcard", Display_Error);
-				Symlink_Mount_Point = "/sdcard";
-			}
-			if (Mount(false) && TWFunc::Path_Exists("/data/media/0")) {
-				Storage_Path = "/data/media/0";
-				Symlink_Path = Storage_Path;
-				DataManager::SetValue(TW_INTERNAL_PATH, "/data/media/0");
-				UnMount(true);
-			}
-#endif
+			if (datamedia)
+				Setup_Data_Media();
 #ifdef TW_INCLUDE_CRYPTO
 			Can_Be_Encrypted = true;
 			char crypto_blkdev[255];
@@ -326,7 +311,7 @@ bool TWPartition::Process_Fstab_Line(string Line, bool Display_Error) {
 				LOGINFO("Data already decrypted, new block device: '%s'\n", crypto_blkdev);
 			} else if (!Mount(false)) {
 				if (Is_Present) {
-#ifdef TW_INCLUDE_JB_CRYPTO
+#if defined(TW_INCLUDE_JB_CRYPTO) || defined(TW_INCLUDE_L_CRYPTO)
 					// No extra flags needed
 #else
 					property_set("ro.crypto.fs_type", CRYPTO_FS_TYPE);
@@ -363,14 +348,11 @@ bool TWPartition::Process_Fstab_Line(string Line, bool Display_Error) {
 				// unmounted state
 				UnMount(false);
 			}
-	#ifdef RECOVERY_SDCARD_ON_DATA
-			if (!Is_Encrypted || (Is_Encrypted && Is_Decrypted))
+			if (datamedia && (!Is_Encrypted || (Is_Encrypted && Is_Decrypted)))
 				Recreate_Media_Folder();
-	#endif
 #else
-	#ifdef RECOVERY_SDCARD_ON_DATA
-			Recreate_Media_Folder();
-	#endif
+			if (datamedia)
+				Recreate_Media_Folder();
 #endif
 		} else if (Mount_Point == "/cache") {
 			Display_Name = "Cache";
@@ -725,6 +707,32 @@ void TWPartition::Setup_AndSec(void) {
 	Mount_Storage_Retry();
 }
 
+void TWPartition::Setup_Data_Media() {
+	LOGINFO("Setting up '%s' as data/media emulated storage.\n", Mount_Point.c_str());
+	Storage_Name = "Internal Storage";
+	Has_Data_Media = true;
+	Is_Storage = true;
+	Is_Settings_Storage = true;
+	Storage_Path = "/data/media";
+	Symlink_Path = Storage_Path;
+	if (strcmp(EXPAND(TW_EXTERNAL_STORAGE_PATH), "/sdcard") == 0) {
+		Make_Dir("/emmc", false);
+		Symlink_Mount_Point = "/emmc";
+	} else {
+		Make_Dir("/sdcard", false);
+		Symlink_Mount_Point = "/sdcard";
+	}
+	if (Mount(false) && TWFunc::Path_Exists("/data/media/0")) {
+		Storage_Path = "/data/media/0";
+		Symlink_Path = Storage_Path;
+		DataManager::SetValue(TW_INTERNAL_PATH, "/data/media/0");
+		UnMount(true);
+	}
+	DataManager::SetValue("tw_has_internal", 1);
+	DataManager::SetValue("tw_has_data_media", 1);
+	du.add_absolute_dir("/data/media");
+}
+
 void TWPartition::Find_Real_Block_Device(string& Block, bool Display_Error) {
 	char device[512], realDevice[512];
 
@@ -889,7 +897,7 @@ bool TWPartition::Find_Partition_Size(void) {
 			char label[32], device[32];
 			unsigned long size = 0;
 
-			sscanf(line, "%s %lx %*lx %*lu %s", label, &size, device);
+			sscanf(line, "%s %lx %*x %*u %s", label, &size, device);
 
 			// Skip header, annotation	and blank lines
 			if ((strncmp(device, "/dev/", 5) != 0) || (strlen(line) < 8))
@@ -1126,6 +1134,9 @@ bool TWPartition::UnMount(bool Display_Error) {
 		if (never_unmount_system == 1 && Mount_Point == "/system")
 			return true; // Never unmount system if you're not supposed to unmount it
 
+		if (Is_Storage)
+			TWFunc::Toggle_MTP(false);
+
 #ifdef TW_INCLUDE_CRYPTO_SAMSUNG
 		if (EcryptFS_Password.size() > 0) {
 			if (unmount_ecryptfs_drive(Mount_Point.c_str()) != 0) {
@@ -1153,15 +1164,16 @@ bool TWPartition::UnMount(bool Display_Error) {
 			else
 				LOGINFO("Unable to unmount '%s'\n", Mount_Point.c_str());
 			return false;
-		} else
+		} else {
 			return true;
+		}
 	} else {
 		return true;
 	}
 }
 
 bool TWPartition::Wipe(string New_File_System) {
-	bool wiped = false, update_crypt = false;
+	bool wiped = false, update_crypt = false, recreate_media = true, mtp_toggle = true;
 	int check;
 	string Layout_Filename = Mount_Point + "/.layout_version";
 
@@ -1187,8 +1199,9 @@ bool TWPartition::Wipe(string New_File_System) {
 
 	if (Has_Data_Media && Current_File_System == New_File_System) {
 		wiped = Wipe_Data_Without_Wiping_Media();
+		recreate_media = false;
+		mtp_toggle = false;
 	} else {
-
 		DataManager::GetValue(TW_RM_RF_VAR, check);
 
 		if (check || Use_Rm_Rf)
@@ -1206,6 +1219,9 @@ bool TWPartition::Wipe(string New_File_System) {
 		else if (New_File_System == "f2fs")
 			wiped = Wipe_F2FS();
 		else {
+			if (Is_Storage) {
+				TWFunc::Toggle_MTP(true);
+			}
 			LOGERR("Unable to wipe '%s' -- unknown file system '%s'\n", Mount_Point.c_str(), New_File_System.c_str());
 			unlink("/.layout_version");
 			return false;
@@ -1242,6 +1258,13 @@ bool TWPartition::Wipe(string New_File_System) {
 				}
 			}
 		}
+
+		if (Mount_Point == "/data" && Has_Data_Media && recreate_media) {
+			Recreate_Media_Folder();
+		}
+	}
+	if (Is_Storage && mtp_toggle) {
+		TWFunc::Toggle_MTP(true);
 	}
 	return wiped;
 }
@@ -1359,9 +1382,9 @@ bool TWPartition::Repair() {
 	return false;
 }
 
-bool TWPartition::Backup(string backup_folder) {
+bool TWPartition::Backup(string backup_folder, const unsigned long long *overall_size, const unsigned long long *other_backups_size) {
 	if (Backup_Method == FILES)
-		return Backup_Tar(backup_folder);
+		return Backup_Tar(backup_folder, overall_size, other_backups_size);
 	else if (Backup_Method == DD)
 		return Backup_DD(backup_folder);
 	else if (Backup_Method == FLASH_UTILS)
@@ -1375,6 +1398,8 @@ bool TWPartition::Check_MD5(string restore_folder) {
 	char split_filename[512];
 	int index = 0;
 	twrpDigest md5sum;
+
+	sync();
 
 	memset(split_filename, 0, sizeof(split_filename));
 	Full_Filename = restore_folder + "/" + Backup_FileName;
@@ -1418,39 +1443,47 @@ bool TWPartition::Check_MD5(string restore_folder) {
 	return false;
 }
 
-bool TWPartition::Restore(string restore_folder) {
-	size_t first_period, second_period;
+bool TWPartition::Restore(string restore_folder, const unsigned long long *total_restore_size, unsigned long long *already_restored_size) {
 	string Restore_File_System;
 
 	TWFunc::GUI_Operation_Text(TW_RESTORE_TEXT, Display_Name, "Restoring");
 	LOGINFO("Restore filename is: %s\n", Backup_FileName.c_str());
 
+	Restore_File_System = Get_Restore_File_System(restore_folder);
+
+	if (Is_File_System(Restore_File_System))
+		return Restore_Tar(restore_folder, Restore_File_System, total_restore_size, already_restored_size);
+	else if (Is_Image(Restore_File_System)) {
+		*already_restored_size += TWFunc::Get_File_Size(Backup_Name);
+		if (Restore_File_System == "emmc")
+			return Restore_DD(restore_folder, total_restore_size, already_restored_size);
+		else if (Restore_File_System == "mtd" || Restore_File_System == "bml")
+			return Restore_Flash_Image(restore_folder, total_restore_size, already_restored_size);
+	}
+
+	LOGERR("Unknown restore method for '%s'\n", Mount_Point.c_str());
+	return false;
+}
+
+string TWPartition::Get_Restore_File_System(string restore_folder) {
+	size_t first_period, second_period;
+	string Restore_File_System;
+
 	// Parse backup filename to extract the file system before wiping
 	first_period = Backup_FileName.find(".");
 	if (first_period == string::npos) {
 		LOGERR("Unable to find file system (first period).\n");
-		return false;
+		return string();
 	}
 	Restore_File_System = Backup_FileName.substr(first_period + 1, Backup_FileName.size() - first_period - 1);
 	second_period = Restore_File_System.find(".");
 	if (second_period == string::npos) {
 		LOGERR("Unable to find file system (second period).\n");
-		return false;
+		return string();
 	}
 	Restore_File_System.resize(second_period);
 	LOGINFO("Restore file system is: '%s'.\n", Restore_File_System.c_str());
-
-	if (Is_File_System(Restore_File_System))
-		return Restore_Tar(restore_folder, Restore_File_System);
-	else if (Is_Image(Restore_File_System)) {
-		if (Restore_File_System == "emmc")
-			return Restore_DD(restore_folder);
-		else if (Restore_File_System == "mtd" || Restore_File_System == "bml")
-			return Restore_Flash_Image(restore_folder);
-	}
-
-	LOGERR("Unknown restore method for '%s'\n", Mount_Point.c_str());
-	return false;
+	return Restore_File_System;
 }
 
 string TWPartition::Backup_Method_By_Name() {
@@ -1483,6 +1516,8 @@ bool TWPartition::Wipe_Encryption() {
 	Decrypted_Block_Device = "";
 	Is_Decrypted = false;
 	Is_Encrypted = false;
+	Find_Actual_Block_Device();
+	bool mtp_was_enabled = TWFunc::Toggle_MTP(false);
 	if (Wipe(Fstab_File_System)) {
 		Has_Data_Media = Save_Data_Media;
 		if (Has_Data_Media && !Symlink_Mount_Point.empty()) {
@@ -1491,6 +1526,7 @@ bool TWPartition::Wipe_Encryption() {
 #ifndef TW_OEM_BUILD
 		gui_print("You may need to reboot recovery to be able to use /data again.\n");
 #endif
+		TWFunc::Toggle_MTP(mtp_was_enabled);
 		return true;
 	} else {
 		Has_Data_Media = Save_Data_Media;
@@ -1565,6 +1601,11 @@ bool TWPartition::Wipe_EXT23(string File_System) {
 }
 
 bool TWPartition::Wipe_EXT4() {
+	Find_Actual_Block_Device();
+	if (!Is_Present) {
+		LOGERR("Block device not present, cannot wipe %s.\n", Display_Name.c_str());
+		return false;
+	}
 	if (!UnMount(true))
 		return false;
 
@@ -1708,6 +1749,8 @@ bool TWPartition::Wipe_MTD() {
 }
 
 bool TWPartition::Wipe_RMRF() {
+	if (Is_Storage)
+		TWFunc::Toggle_MTP(false);
 	if (!Mount(true))
 		return false;
 
@@ -1794,10 +1837,6 @@ bool TWPartition::Wipe_Data_Without_Wiping_Media() {
 		}
 		closedir(d);
 
-		#ifdef HAVE_SELINUX
-		perms.fixDataInternalContexts();
-		#endif
-
 		gui_print("Done.\n");
 		return true;
 	}
@@ -1806,7 +1845,7 @@ bool TWPartition::Wipe_Data_Without_Wiping_Media() {
 #endif // ifdef TW_OEM_BUILD
 }
 
-bool TWPartition::Backup_Tar(string backup_folder) {
+bool TWPartition::Backup_Tar(string backup_folder, const unsigned long long *overall_size, const unsigned long long *other_backups_size) {
 	char back_name[255], split_index[5];
 	string Full_FileName, Split_FileName, Tar_Args, Command;
 	int use_compression, use_encryption = 0, index, backup_count;
@@ -1846,7 +1885,9 @@ bool TWPartition::Backup_Tar(string backup_folder) {
 	tar.setdir(Backup_Path);
 	tar.setfn(Full_FileName);
 	tar.setsize(Backup_Size);
-	if (tar.createTarFork() != 0)
+	tar.partition_name = Backup_Name;
+	tar.backup_folder = backup_folder;
+	if (tar.createTarFork(overall_size, other_backups_size) != 0)
 		return false;
 	return true;
 }
@@ -1901,7 +1942,40 @@ bool TWPartition::Backup_Dump_Image(string backup_folder) {
 	return true;
 }
 
-bool TWPartition::Restore_Tar(string restore_folder, string Restore_File_System) {
+unsigned long long TWPartition::Get_Restore_Size(string restore_folder) {
+	InfoManager restore_info(restore_folder + "/" + Backup_Name + ".info");
+	if (restore_info.LoadValues() == 0) {
+		if (restore_info.GetValue("backup_size", Restore_Size) == 0) {
+			LOGINFO("Read info file, restore size is %llu\n", Restore_Size);
+			return Restore_Size;
+		}
+	}
+	string Full_FileName, Restore_File_System = Get_Restore_File_System(restore_folder);
+
+	Full_FileName = restore_folder + "/" + Backup_FileName;
+
+	if (Is_Image(Restore_File_System)) {
+		Restore_Size = TWFunc::Get_File_Size(Full_FileName);
+		return Restore_Size;
+	}
+
+	twrpTar tar;
+	tar.setdir(Backup_Path);
+	tar.setfn(Full_FileName);
+	tar.backup_name = Backup_Name;
+#ifndef TW_EXCLUDE_ENCRYPTED_BACKUPS
+	string Password;
+	DataManager::GetValue("tw_restore_password", Password);
+	if (!Password.empty())
+		tar.setpassword(Password);
+#endif
+	tar.partition_name = Backup_Name;
+	tar.backup_folder = restore_folder;
+	Restore_Size = tar.get_size();
+	return Restore_Size;
+}
+
+bool TWPartition::Restore_Tar(string restore_folder, string Restore_File_System, const unsigned long long *total_restore_size, unsigned long long *already_restored_size) {
 	string Full_FileName, Command;
 	int index = 0;
 	char split_index[5];
@@ -1912,8 +1986,15 @@ bool TWPartition::Restore_Tar(string restore_folder, string Restore_File_System)
 			return false;
 	} else {
 		gui_print("Wiping %s...\n", Display_Name.c_str());
-		if (!Wipe(Restore_File_System))
-			return false;
+		if (Has_Data_Media && Mount_Point == "/data" && Restore_File_System != Current_File_System) {
+			gui_print("WARNING: This /data backup was made with %s file system!\n", Restore_File_System.c_str());
+			gui_print("The backup may not boot unless you change back to %s.\n", Restore_File_System.c_str());
+			if (!Wipe_Data_Without_Wiping_Media())
+				return false;
+		} else {
+			if (!Wipe(Restore_File_System))
+				return false;
+		}
 	}
 	TWFunc::GUI_Operation_Text(TW_RESTORE_TEXT, Backup_Display_Name, "Restoring");
 	gui_print("Restoring %s...\n", Backup_Display_Name.c_str());
@@ -1932,7 +2013,7 @@ bool TWPartition::Restore_Tar(string restore_folder, string Restore_File_System)
 	if (!Password.empty())
 		tar.setpassword(Password);
 #endif
-	if (tar.extractTarFork() != 0)
+	if (tar.extractTarFork(total_restore_size, already_restored_size) != 0)
 		ret = false;
 	else
 		ret = true;
@@ -1958,8 +2039,10 @@ bool TWPartition::Restore_Tar(string restore_folder, string Restore_File_System)
 	return ret;
 }
 
-bool TWPartition::Restore_DD(string restore_folder) {
+bool TWPartition::Restore_DD(string restore_folder, const unsigned long long *total_restore_size, unsigned long long *already_restored_size) {
 	string Full_FileName, Command;
+	double display_percent, progress_percent;
+	char size_progress[1024];
 
 	TWFunc::GUI_Operation_Text(TW_RESTORE_TEXT, Display_Name, "Restoring");
 	Full_FileName = restore_folder + "/" + Backup_FileName;
@@ -1980,11 +2063,19 @@ bool TWPartition::Restore_DD(string restore_folder) {
 	Command = "dd bs=4096 if='" + Full_FileName + "' of=" + Actual_Block_Device;
 	LOGINFO("Restore command: '%s'\n", Command.c_str());
 	TWFunc::Exec_Cmd(Command);
+	display_percent = (double)(Restore_Size + *already_restored_size) / (double)(*total_restore_size) * 100;
+	sprintf(size_progress, "%lluMB of %lluMB, %i%%", (Restore_Size + *already_restored_size) / 1048576, *total_restore_size / 1048576, (int)(display_percent));
+	DataManager::SetValue("tw_size_progress", size_progress);
+	progress_percent = (display_percent / 100);
+	DataManager::SetProgress((float)(progress_percent));
+	*already_restored_size += Restore_Size;
 	return true;
 }
 
-bool TWPartition::Restore_Flash_Image(string restore_folder) {
+bool TWPartition::Restore_Flash_Image(string restore_folder, const unsigned long long *total_restore_size, unsigned long long *already_restored_size) {
 	string Full_FileName, Command;
+	double display_percent, progress_percent;
+	char size_progress[1024];
 
 	gui_print("Restoring %s...\n", Display_Name.c_str());
 	Full_FileName = restore_folder + "/" + Backup_FileName;
@@ -1995,6 +2086,12 @@ bool TWPartition::Restore_Flash_Image(string restore_folder) {
 	Command = "flash_image " + MTD_Name + " '" + Full_FileName + "'";
 	LOGINFO("Restore command: '%s'\n", Command.c_str());
 	TWFunc::Exec_Cmd(Command);
+	display_percent = (double)(Restore_Size + *already_restored_size) / (double)(*total_restore_size) * 100;
+	sprintf(size_progress, "%lluMB of %lluMB, %i%%", (Restore_Size + *already_restored_size) / 1048576, *total_restore_size / 1048576, (int)(display_percent));
+	DataManager::SetValue("tw_size_progress", size_progress);
+	progress_percent = (display_percent / 100);
+	DataManager::SetProgress((float)(progress_percent));
+	*already_restored_size += Restore_Size;
 	return true;
 }
 
@@ -2053,9 +2150,9 @@ bool TWPartition::Update_Size(bool Display_Error) {
 }
 
 void TWPartition::Find_Actual_Block_Device(void) {
-	if (Is_Decrypted) {
+	if (Is_Decrypted && !Decrypted_Block_Device.empty()) {
 		Actual_Block_Device = Decrypted_Block_Device;
-		if (TWFunc::Path_Exists(Primary_Block_Device))
+		if (TWFunc::Path_Exists(Decrypted_Block_Device))
 			Is_Present = true;
 	} else if (TWFunc::Path_Exists(Primary_Block_Device)) {
 		Is_Present = true;
@@ -2084,10 +2181,12 @@ void TWPartition::Recreate_Media_Folder(void) {
 		PartitionManager.Mount_By_Path(Symlink_Mount_Point, true);
 		LOGINFO("Recreating /data/media folder.\n");
 		mkdir("/data/media", S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
-		#ifdef HAVE_SELINUX
+#ifdef HAVE_SELINUX
 		perms.fixDataInternalContexts();
-		#endif
+#endif
+		// Toggle mount to ensure that "internal sdcard" gets mounted
 		PartitionManager.UnMount_By_Path(Symlink_Mount_Point, true);
+		PartitionManager.Mount_By_Path(Symlink_Mount_Point, true);
 	}
 }
 

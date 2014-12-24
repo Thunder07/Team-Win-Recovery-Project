@@ -79,6 +79,13 @@ enum
 #define MROM_SWAP_COPY_INTERNAL  2
 #define MROM_SWAP_MOVE_INTERNAL  3
 
+#define MROM_AUTOBOOT_LAST       0x01
+#define MROM_AUTOBOOT_CHECK_KEYS 0x04
+
+#define MROM_AUTOBOOT_TRIGGER_DISABLED 0
+#define MROM_AUTOBOOT_TRIGGER_TIME     1
+#define MROM_AUTOBOOT_TRIGGER_KEYS     2
+
 struct base_folder
 {
 	base_folder(const std::string& name, int min_size, int size);
@@ -156,7 +163,7 @@ public:
 	static bool disableFlashKernelAct(std::string name, std::string loc);
 	static bool fakeBootPartition(const char *fakeImg);
 	static void restoreBootPartition();
-	static void failsafeCheckBootPartition();
+	static void failsafeCheckPartition(const char *path);
 	static bool compareFiles(const char *path1, const char *path2);
 
 	static void executeCacheScripts();
@@ -178,9 +185,10 @@ private:
 	static bool changeMounts2(std::string base);
 	static bool uMounts2(std::string base);
 	static void restoreMounts();
-	static bool prepareZIP(std::string& file);
+	static bool prepareZIP(std::string& file, bool &has_block_update);
 	static bool verifyZIP(const std::string& file, int &verify_status);
 	static bool skipLine(const char *line);
+	static void appendBraces(FILE *out, const char *line);
 	static std::string getNewRomName(std::string zip, std::string def);
 	static bool createDirs(std::string name, int type);
 	static bool compressRamdisk(const char *src, const char *dest, int cmpr);
@@ -202,6 +210,7 @@ private:
 	static bool createDirsFromBase(const std::string& base);
 	static bool mountBaseImages(std::string base, std::string& dest);
 	static void umountBaseImages(const std::string& base);
+	static bool createFakeSystemImg();
 
 	static int system_args(const char *fmt, ...);
 	static void translateToRealdata(std::string& path);

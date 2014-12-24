@@ -20,10 +20,17 @@
 #include "partitions.hpp"
 #include "twrp-functions.hpp"
 #include "twinstall.h"
+#if (ANDROID_VERSION >= 5)
+#include "minzip/SysUtil.h"
 #include "minzip/Zip.h"
+#include "verifier.h"
+#else
+#include "minzipold/SysUtil.h"
+#include "minzipold/Zip.h"
+#include "verifierold.h"
+#endif
 #include "variables.h"
 #include "openrecoveryscript.hpp"
-#include "verifier.h"
 
 extern "C" {
 #include "twcommon.h"
@@ -160,8 +167,10 @@ bool MultiROM::setRomsPath(std::string loc)
 	char cmd[256];
 	if(loc.find("(ntfs") != std::string::npos)
 		sprintf(cmd, "ntfs-3g %s /mnt", dev.c_str());
+#ifndef TW_NO_EXFAT_FUSE
 	else if(loc.find("(exfat)") != std::string::npos)
 		sprintf(cmd, "exfat-fuse -o big_writes,max_read=131072,max_write=131072,nonempty %s /mnt", dev.c_str());
+#endif
 	else
 		sprintf(cmd, "mount %s /mnt", dev.c_str());
 
@@ -189,7 +198,7 @@ std::string MultiROM::listInstallLocations()
 
 	while((dt = readdir(d)))
 	{
-		if(strncmp(dt->d_name, "sd", 2) != 0)
+		if(strncmp(dt->d_name, "mmcblk0", 7) == 0 || strncmp(dt->d_name, "dm-", 3) == 0)
 			continue;
 		snprintf(path, sizeof(path), "/dev/block/%s", dt->d_name);
 
@@ -389,7 +398,7 @@ int MultiROM::getType(std::string name)
 				return ROM_UTOUCH_INTERNAL;
 		}
 
-		if (access((path + "data").c_str(), F_OK) >= 0 && 
+		if (access((path + "data").c_str(), F_OK) >= 0 &&
 			access((path + "rom_info.txt").c_str(), F_OK) >= 0)
 		{
 			return ROM_SAILFISH_INTERNAL;
@@ -726,6 +735,9 @@ bool MultiROM::uMounts2(std::string name)
 
 void MultiROM::restoreMounts()
 {
+	if(!PartitionManager.Has_Extra_Contexts())
+		return;
+
 	gui_print("Restoring mounts...\n");
 
 	system("mv /sbin/umount.bak /sbin/umount");
@@ -824,14 +836,66 @@ void MultiROM::restoreROMPath()
 	m_mount_rom_paths[0].clear();
 }
 
+bool MultiROM::createFakeSystemImg()
+{
+	std::string sysimg = m_path;
+	translateToRealdata(sysimg);
+
+	TWPartition *data = PartitionManager.Find_Partition_By_Path("/realdata");
+	TWPartition *sys = PartitionManager.Find_Original_Partition_By_Path("/system");
+	if(!data || !sys)
+	{
+		LOGERR("Failed to find /data or /system partition!\n");
+		return false;
+	}
+
+	if(!createImage(sysimg, "system", sys->GetSizeTotal()/1024/1024 + 32))
+	{
+		LOGERR("Failed to create system.img!");
+		return false;
+	}
+
+	std::string loop_device;
+	if(TWFunc::Exec_Cmd("losetup -f", loop_device) < 0)
+	{
+		system_args("rm \"%s/system.img\"", sysimg.c_str());
+		LOGERR("Failed to find free loop device\n");
+		return false;
+	}
+
+	TWFunc::trim(loop_device);
+
+	if(system_args("losetup \"%s\" \"%s/system.img\"", loop_device.c_str(), sysimg.c_str()) != 0)
+	{
+		system_args("rm \"%s/system.img\"", sysimg.c_str());
+		LOGERR("Failed to setup loop device!\n");
+		return false;
+	}
+
+	if(system_args("mv \"%s\" \"%s-orig\" && ln -s \"%s\" \"%s\"",
+		sys->Actual_Block_Device.c_str(), sys->Actual_Block_Device.c_str(), loop_device.c_str(), sys->Actual_Block_Device.c_str()) != 0)
+	{
+		system_args("losetup -d \"%s\"; rm -f \"%s/system.img\"", loop_device.c_str(), sysimg.c_str());
+		LOGERR("Failed to fake system device!\n");
+		return false;
+	}
+
+	system_args("rm \"%s/system.img\"", sysimg.c_str());
+	system_args("echo \"%s\" > /tmp/mrom_fakesyspart", sys->Actual_Block_Device.c_str());
+	return true;
+}
+
 #define MR_UPDATE_SCRIPT_PATH  "META-INF/com/google/android/"
 #define MR_UPDATE_SCRIPT_NAME  "META-INF/com/google/android/updater-script"
 
 bool MultiROM::flashZip(std::string rom, std::string file)
 {
-	int status;
+	int status = INSTALL_ERROR;
 	int verify_status = 0;
 	int wipe_cache = 0;
+	bool has_block_update = false;
+	std::string boot, sideload_path, sysimg, loop_device;
+	TWPartition *data, *sys;
 
 	gui_print("Flashing ZIP file %s\n", file.c_str());
 	gui_print("ROM: %s\n", rom.c_str());
@@ -840,26 +904,30 @@ bool MultiROM::flashZip(std::string rom, std::string file)
 		return false;
 
 	gui_print("Preparing ZIP file...\n");
-	if(!prepareZIP(file))  // may change file var
+	if(!prepareZIP(file, has_block_update))  // may change file var
 		return false;
 
 	if(!changeMounts(rom))
 	{
 		gui_print("Failed to change mountpoints!\n");
-		return false;
+		goto exit;
 	}
 
-	std::string boot = getRomsPath() + rom;
+	boot = getRomsPath() + rom;
 	normalizeROMPath(boot);
 	boot += "/boot.img";
 
 	translateToRealdata(file);
 	translateToRealdata(boot);
-	
+
 	if(!fakeBootPartition(boot.c_str()))
+		goto exit;
+
+	if(has_block_update)
 	{
-		restoreMounts();
-		return false;
+		gui_print("ZIP uses block updates\n");
+		if(!createFakeSystemImg())
+			goto exit;
 	}
 
 	DataManager::SetValue(TW_SIGNED_ZIP_VERIFY_VAR, 0);
@@ -875,22 +943,33 @@ bool MultiROM::flashZip(std::string rom, std::string file)
 	else
 		gui_print("ZIP successfully installed\n");
 
+	if(has_block_update)
+	{
+		if(status == INSTALL_SUCCESS)
+			copyXAttrs("/tmpsystem", "/system", DT_DIR);
+		system_args("busybox umount -d /tmpsystem");
+	}
+
+exit:
+	if(has_block_update)
+		failsafeCheckPartition("/tmp/mrom_fakesyspart");
+
 	restoreBootPartition();
 	restoreMounts();
 
-	std::string sideload_path = DataManager::GetStrValue("tw_mrom_sideloaded");
+	sideload_path = DataManager::GetStrValue("tw_mrom_sideloaded");
 	if(!sideload_path.empty())
 	{
 		unlink(sideload_path.c_str());
 		DataManager::SetValue("tw_mrom_sideloaded", "");
 	}
-
 	return (status == INSTALL_SUCCESS);
 }
 
 bool MultiROM::flashORSZip(std::string file, int *wipe_cache)
 {
 	int status, verify_status = 0;
+	bool has_block_update = false;
 
 	gui_print("Flashing ZIP file %s\n", file.c_str());
 
@@ -898,8 +977,15 @@ bool MultiROM::flashORSZip(std::string file, int *wipe_cache)
 		return false;
 
 	gui_print("Preparing ZIP file...\n");
-	if(!prepareZIP(file)) // may change file var
+	if(!prepareZIP(file, has_block_update)) // may change file var
 		return false;
+
+	if(has_block_update)
+	{
+		gui_print("ZIP uses block updates\n");
+		if(!createFakeSystemImg())
+			return false;
+	}
 
 	DataManager::SetValue(TW_SIGNED_ZIP_VERIFY_VAR, 0);
 	status = TWinstall_zip(file.c_str(), wipe_cache);
@@ -914,6 +1000,14 @@ bool MultiROM::flashORSZip(std::string file, int *wipe_cache)
 	else
 		gui_print("ZIP successfully installed\n");
 
+	if(has_block_update)
+	{
+		if(status == INSTALL_SUCCESS)
+			copyXAttrs("/tmpsystem", "/system", DT_DIR);
+		system_args("busybox umount -d /tmpsystem");
+		failsafeCheckPartition("/tmp/mrom_fakesyspart");
+	}
+
 	return (status == INSTALL_SUCCESS);
 }
 
@@ -924,7 +1018,17 @@ bool MultiROM::verifyZIP(const std::string& file, int &verify_status)
 		return true;
 
 	gui_print("Verifying zip signature...\n");
+#if (ANDROID_VERSION >= 5)
+	MemMapping map;
+	if (sysMapFile(file.c_str(), &map) != 0) {
+		LOGERR("Failed to sysMapFile '%s'\n", file.c_str());
+		return false;
+	}
+	int ret_val = verify_file(map.addr, map.length);
+	sysReleaseMap(&map);
+#else
 	int ret_val = verify_file(file.c_str());
+#endif
 	if (ret_val != VERIFY_SUCCESS) {
 		LOGERR("Zip signature verification failed: %i\n", ret_val);
 		return false;
@@ -969,6 +1073,7 @@ static char *strstr_wildcard(const char *s, const char *find)
 	return NULL;
 }
 
+// This needs to fucking go.
 bool MultiROM::skipLine(const char *line)
 {
 
@@ -976,7 +1081,7 @@ bool MultiROM::skipLine(const char *line)
 		if (strstr(line, "mount") < strstr(line, "ui_print"))
 			return true;
 
-	if(strstr(line, "mount") && !strstr(line, "ui_print"))
+	if((strstr(line, "mount(") || strstr(line, "mount\"")) && !strstr(line, "ui_print"))
 	{
 		if (strstr(line, "run_program") ||
 			(!strstr_wildcard(line, "/system/?bin/?mount") && !strstr(line, "symlink(")))
@@ -1003,15 +1108,49 @@ bool MultiROM::skipLine(const char *line)
 	return false;
 }
 
-bool MultiROM::prepareZIP(std::string& file)
+void MultiROM::appendBraces(FILE *out, const char *line)
+{
+	int counter = 0;
+	int tildas = 0;
+	for(; *line; ++line)
+	{
+		if(*line == '(')
+			++counter;
+		else if(*line == ')')
+		{
+			--counter;
+			tildas = 0;
+		}
+		else if(*line == ';')
+			++tildas;
+	}
+
+	char c = '(';
+	if(counter < 0)
+	{
+		c = ')';
+		counter *= -1;
+	}
+	else
+		tildas = 0;
+
+	for(int i = 0; i < counter; ++i)
+		fputc(c, out);
+
+	if(tildas)
+		fputc(';', out);
+	fputc('\n', out);
+}
+
+bool MultiROM::prepareZIP(std::string& file, bool &has_block_update)
 {
 	bool res = false;
 
 	const ZipEntry *script_entry;
 	int script_len;
-	char* script_data;
+	char* script_data = NULL;
 	int itr = 0;
-	char *token, *p;
+	char *token, *p, *saveptr;
 	bool changed = false;
 
 	char cmd[512];
@@ -1024,23 +1163,6 @@ bool MultiROM::prepareZIP(std::string& file)
 		return false;
 	}
 
-	if(info.st_size < 450*1024*1024)
-	{
-		gui_print("Copying ZIP to /tmp...\n");
-		sprintf(cmd, "cp \"%s\" /tmp/mr_update.zip", file.c_str());
-		system(cmd);
-		file = "/tmp/mr_update.zip";
-	}
-	else
-	{
-		gui_print(" \n");
-		gui_print("=======================================================\n");
-		gui_print("WARN: Modifying the real ZIP, it is too big!\n");
-		gui_print("The ZIP file is now unusable for non-MultiROM flashing!\n");
-		gui_print("=======================================================\n");
-		gui_print(" \n");
-	}
-
 	sprintf(cmd, "mkdir -p /tmp/%s", MR_UPDATE_SCRIPT_PATH);
 	system(cmd);
 
@@ -1050,8 +1172,21 @@ bool MultiROM::prepareZIP(std::string& file)
 	if(!new_script)
 		return false;
 
+#if (ANDROID_VERSION >= 5)
+	MemMapping map;
+	if (sysMapFile(file.c_str(), &map) != 0) {
+		LOGERR("Failed to sysMapFile '%s'\n", file.c_str());
+		fclose(new_script);
+		return false;
+	}
+#endif
+
 	ZipArchive zip;
+#if (ANDROID_VERSION >= 5)
+	if (mzOpenZipArchive(map.addr, map.length, &zip) != 0)
+#else
 	if (mzOpenZipArchive(file.c_str(), &zip) != 0)
+#endif
 	{
 		gui_print("Failed to open ZIP archive %s!\n", file.c_str());
 		goto exit;
@@ -1066,13 +1201,16 @@ bool MultiROM::prepareZIP(std::string& file)
 
 	if (read_data(&zip, script_entry, &script_data, &script_len) < 0)
 	{
-		gui_print("Failed to read updater-script entry from %s!", file.c_str());
+		gui_print("Failed to read updater-script entry from %s!\n", file.c_str());
 		goto exit;
 	}
 
 	mzCloseZipArchive(&zip);
+#if (ANDROID_VERSION >= 5)
+	sysReleaseMap(&map);
+#endif
 
-	token = strtok(script_data, "\n");
+	token = strtok_r(script_data, "\n", &saveptr);
 	while(token)
 	{
 		for(p = token; isspace(*p); ++p);
@@ -1086,6 +1224,8 @@ bool MultiROM::prepareZIP(std::string& file)
 		{
 			changed = true;
 
+			appendBraces(new_script, p);
+
 			if (strstr(p, "format(") == p && strstr(p, "/system"))
 			{
 				fputs("run_program(\"/sbin/sh\", \"-c\", \"grep -q '/system' /etc/mtab || mount /system\");\n", new_script);
@@ -1093,18 +1233,63 @@ bool MultiROM::prepareZIP(std::string& file)
 				fputs("run_program(\"/sbin/sh\", \"-c\", \"rm -rf /system/*\");\n", new_script);
 			}
 
+			if(strstr(p, "block_image_update(") == p)
+			{
+				has_block_update = true;
+
+				fputs(token, new_script);
+				fputc('\n', new_script);
+
+				TWPartition *sys = PartitionManager.Find_Original_Partition_By_Path("/system");
+				if(sys)
+				{
+					fprintf(new_script, "run_program(\"/sbin/sh\", \"-c\", \"mkdir -p /tmpsystem && mount -t ext4 $(readlink -f -n %s) /tmpsystem && cp -a /tmpsystem/* /system/\");\n",
+							sys->Actual_Block_Device.c_str());
+				}
+			}
 		}
-		token = strtok(NULL, "\n");
+		token = strtok_r(NULL, "\n", &saveptr);
 	}
 
 	free(script_data);
+	script_data = NULL;
 	fclose(new_script);
+
+	if(has_block_update)
+	{
+		TWPartition *data = PartitionManager.Find_Original_Partition_By_Path("/data");
+		if(data && info.st_size*2.25 > data->GetSizeFree())
+		{
+			LOGERR("Failed, you need at least %llu MB of free space on /data!", uint64_t(info.st_size*2.25)/1024/1024);
+			goto exit;
+		}
+	}
 
 	if(changed)
 	{
+		if(info.st_size < 450*1024*1024)
+		{
+			gui_print("Copying ZIP to /tmp...\n");
+			sprintf(cmd, "cp \"%s\" /tmp/mr_update.zip", file.c_str());
+			system(cmd);
+			file = "/tmp/mr_update.zip";
+		}
+		else
+		{
+			gui_print(" \n");
+			gui_print("=================================\n");
+			LOGERR("WARN: Modifying the real ZIP, it is too big!\n");
+			LOGERR("The ZIP file is now unusable for non-MultiROM flashing!\n");
+			gui_print("=================================\n");
+			gui_print(" \n");
+		}
+
 		sprintf(cmd, "cd /tmp && zip \"%s\" %s", file.c_str(), MR_UPDATE_SCRIPT_NAME);
 		if(system(cmd) != 0)
+		{
+			system("rm /tmp/mr_update.zip");
 			return false;
+		}
 	}
 	else
 		gui_print("No need to change ZIP.\n");
@@ -1112,7 +1297,11 @@ bool MultiROM::prepareZIP(std::string& file)
 	return true;
 
 exit:
+	free(script_data);
 	mzCloseZipArchive(&zip);
+#if (ANDROID_VERSION >= 5)
+	sysReleaseMap(&map);
+#endif
 	fclose(new_script);
 	return false;
 }
@@ -1330,6 +1519,8 @@ std::string MultiROM::getNewRomName(std::string zip, std::string def)
 	if(name.size() > MAX_ROM_NAME)
 		name.resize(MAX_ROM_NAME);
 
+	TWFunc::trim(name);
+
 	DIR *d = opendir(getRomsPath().c_str());
 	if(!d)
 		return "";
@@ -1449,7 +1640,7 @@ bool MultiROM::createDirs(std::string name, int type)
 	std::string base = getRomsPath() + "/" + name;
 	if(mkdir(base.c_str(), 0777) < 0)
 	{
-		gui_print("Failed to create ROM folder!\n");
+		gui_print("Failed to create ROM folder \"%s\" (%s)!\n", base.c_str(), strerror(errno));
 		return false;
 	}
 
@@ -2039,6 +2230,7 @@ bool MultiROM::installFromBackup(std::string name, std::string path, int type)
 	if(path.find("/data/media") == 0)
 		path.replace(0, 5, REALDATA);
 
+	unsigned long long total_restore_size = 0, already_restored_size = 0;
 	const int partCnt = has_data ? 2 : 1;
 	bool res = false;
 	TWPartition *sys_part = PartitionManager.Find_Partition_By_Path("/system");
@@ -2046,8 +2238,8 @@ bool MultiROM::installFromBackup(std::string name, std::string path, int type)
 	if(sys_part && data_part)
 	{
 		PartitionManager.Set_Restore_Files(path);
-		res = PartitionManager.Restore_Partition(sys_part, path, partCnt) &&
-				(!has_data || PartitionManager.Restore_Partition(data_part, path, partCnt));
+		res = PartitionManager.Restore_Partition(sys_part, path, partCnt, &total_restore_size, &already_restored_size) &&
+				(!has_data || PartitionManager.Restore_Partition(data_part, path, partCnt, &total_restore_size, &already_restored_size));
 	}
 	else
 	{
@@ -2449,10 +2641,10 @@ void MultiROM::restoreBootPartition()
 	remove("/tmp/mrom_fakebootpart");
 }
 
-void MultiROM::failsafeCheckBootPartition()
+void MultiROM::failsafeCheckPartition(const char *path)
 {
 	std::string dev;
-	if(access("/tmp/mrom_fakebootpart", F_OK) < 0 || TWFunc::read_file("/tmp/mrom_fakebootpart", dev) != 0)
+	if(access(path, F_OK) < 0 || TWFunc::read_file(path, dev) != 0)
 		return;
 
 	while(isspace(*(dev.end()-1)))
@@ -2463,11 +2655,9 @@ void MultiROM::failsafeCheckBootPartition()
 	if(access((dev + "-orig").c_str(), F_OK) < 0 || (res >= 0 && !S_ISLNK(info.st_mode)))
 		return;
 
-	gui_print("Restoring original boot device!\nRecovery has probably crashed in the middle of MultiROM operation.\n");
-
 	system_args("rm \"%s\"", dev.c_str());
 	system_args("mv \"%s-orig\" \"%s\"", dev.c_str(), dev.c_str());
-	remove("/tmp/mrom_fakebootpart");
+	remove(path);
 }
 
 bool MultiROM::calculateMD5(const char *path, unsigned char *md5sum/*len: 16*/)
@@ -2853,7 +3043,7 @@ bool MultiROM::copySingleXAttr(const char *from, const char *to)
 	if (res == sizeof(struct vfs_cap_data))
 	{
 		res = lsetxattr(to, "security.capability", &cap_data, sizeof(struct vfs_cap_data), 0);
-		if(res < 0)
+		if(res < 0 && errno != ENOENT)
 		{
 			LOGERR("Failed to lsetxattr capability on %s: %d (%s)\n", to, errno, strerror(errno));
 			return false;
@@ -2865,7 +3055,7 @@ bool MultiROM::copySingleXAttr(const char *from, const char *to)
 	{
 		selabel[sizeof(selabel)-1] = 0;
 		res = lsetxattr(to, "security.selinux", selabel, strlen(selabel)+1, 0);
-		if(res < 0)
+		if(res < 0 && errno != ENOENT)
 		{
 			LOGERR("Failed to lsetxattr selinux on %s: %d (%s)\n", to, errno, strerror(errno));
 			return false;

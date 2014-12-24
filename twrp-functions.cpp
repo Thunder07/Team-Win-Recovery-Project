@@ -35,6 +35,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <ctype.h>
 #include "twrp-functions.hpp"
 #include "twcommon.h"
 #ifndef BUILD_TWRPTAR_MAIN
@@ -42,6 +43,7 @@
 #include "partitions.hpp"
 #include "variables.h"
 #include "bootloader.h"
+#include "cutils/properties.h"
 #ifdef ANDROID_RB_POWEROFF
 	#include "cutils/android_reboot.h"
 #endif
@@ -49,6 +51,7 @@
 #ifndef TW_EXCLUDE_ENCRYPTED_BACKUPS
 	#include "openaes/inc/oaes_lib.h"
 #endif
+#include "cutils/android_reboot.h"
 
 extern "C" {
 	#include "libcrecovery/common.h"
@@ -75,7 +78,7 @@ int TWFunc::Exec_Cmd(const string& cmd, string &result) {
 		memset(&buffer, 0, sizeof(buffer));
 		if (fgets(buffer, 128, exec) != NULL) {
 			buffer[128] = '\n';
-			buffer[129] = NULL;
+			buffer[129] = 0;
 			result += buffer;
 		}
 	}
@@ -330,6 +333,30 @@ std::string TWFunc::Remove_Trailing_Slashes(const std::string& path, bool leaveL
 	return res;
 }
 
+vector<string> TWFunc::split_string(const string &in, char del, bool skip_empty) {
+	vector<string> res;
+
+	if (in.empty() || del == '\0')
+		return res;
+
+	string field;
+	istringstream f(in);
+	if (del == '\n') {
+		while(getline(f, field)) {
+			if (field.empty() && skip_empty)
+				continue;
+		res.push_back(field);
+		}
+	} else {
+		while(getline(f, field, del)) {
+			if (field.empty() && skip_empty)
+				continue;
+			res.push_back(field);
+		}
+	}
+	return res;
+}
+
 #ifndef BUILD_TWRPTAR_MAIN
 
 // Returns "/path" from a full /path/to/file.name
@@ -530,10 +557,22 @@ int TWFunc::tw_reboot(RebootCommand command)
 			return reboot(RB_AUTOBOOT);
 		case rb_recovery:
 			check_and_run_script("/sbin/rebootrecovery.sh", "reboot recovery");
+#ifdef ANDROID_RB_PROPERTY
+			property_set(ANDROID_RB_PROPERTY, "reboot,recovery");
+#else
 			return __reboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_CMD_RESTART2, (void*) "recovery");
+#endif
+			sleep(5);
+			return 0;
 		case rb_bootloader:
 			check_and_run_script("/sbin/rebootbootloader.sh", "reboot bootloader");
+#ifdef ANDROID_RB_PROPERTY
+			property_set(ANDROID_RB_PROPERTY, "reboot,bootloader");
+#else
 			return __reboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_CMD_RESTART2, (void*) "bootloader");
+#endif
+			sleep(5);
+			return 0;
 		case rb_poweroff:
 			check_and_run_script("/sbin/poweroff.sh", "power off");
 #ifdef ANDROID_RB_POWEROFF
@@ -542,7 +581,13 @@ int TWFunc::tw_reboot(RebootCommand command)
 			return reboot(RB_POWER_OFF);
 		case rb_download:
 			check_and_run_script("/sbin/rebootdownload.sh", "reboot download");
+#ifdef ANDROID_RB_PROPERTY
+			property_set(ANDROID_RB_PROPERTY, "reboot,download");
+#else
 			return __reboot(LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_CMD_RESTART2, (void*) "download");
+#endif
+			sleep(5);
+			return 0;
 		default:
 			return -1;
 	}
@@ -662,6 +707,20 @@ int TWFunc::read_file(string fn, vector<string>& results) {
 		file.close();
 		return 0;
 	}
+	LOGINFO("Cannot find file %s\n", fn.c_str());
+	return -1;
+}
+
+int TWFunc::read_file(string fn, uint64_t& results) {
+	ifstream file;
+	file.open(fn.c_str(), ios::in);
+
+	if (file.is_open()) {
+		file >> results;
+		file.close();
+		return 0;
+	}
+
 	LOGINFO("Cannot find file %s\n", fn.c_str());
 	return -1;
 }
@@ -1083,6 +1142,38 @@ void TWFunc::Auto_Generate_Backup_Name() {
 void TWFunc::Fixup_Time_On_Boot()
 {
 #ifdef QCOM_RTC_FIX
+
+	LOGINFO("TWFunc::Fixup_Time: Pre-fix date and time: %s\n", TWFunc::Get_Current_Date().c_str());
+
+	struct timeval tv;
+	uint64_t offset = 0;
+	std::string sepoch = "/sys/class/rtc/rtc0/since_epoch";
+
+	if (TWFunc::read_file(sepoch, offset) == 0) {
+
+		LOGINFO("TWFunc::Fixup_Time: Setting time offset from file %s\n", sepoch.c_str());
+
+		tv.tv_sec = offset;
+		tv.tv_usec = 0;
+		settimeofday(&tv, NULL);
+
+		gettimeofday(&tv, NULL);
+
+		if (tv.tv_sec > 1405209403) { // Anything older then 12 Jul 2014 23:56:43 GMT will do nicely thank you ;)
+
+			LOGINFO("TWFunc::Fixup_Time: Date and time corrected: %s\n", TWFunc::Get_Current_Date().c_str());
+			return;
+
+		}
+
+	} else {
+
+		LOGINFO("TWFunc::Fixup_Time: opening %s failed\n", sepoch.c_str());
+
+	}
+
+	LOGINFO("TWFunc::Fixup_Time: will attempt to use the ats files now.\n", sepoch.c_str());
+
 	// Devices with Qualcomm Snapdragon 800 do some shenanigans with RTC.
 	// They never set it, it just ticks forward from 1970-01-01 00:00,
 	// and then they have files /data/system/time/ats_* with 64bit offset
@@ -1094,22 +1185,11 @@ void TWFunc::Fixup_Time_On_Boot()
 
 	static const char *paths[] = { "/data/system/time/", "/data/time/"  };
 
-	DIR *d;
 	FILE *f;
-	uint64_t offset = 0;
-	struct timeval tv;
+	DIR *d;
+	offset = 0;
 	struct dirent *dt;
 	std::string ats_path;
-
-
-	// Don't fix the time of it already is over year 2000, it is likely already okay, either
-	// because the RTC is fine or because the recovery already set it and then crashed
-	gettimeofday(&tv, NULL);
-	if(tv.tv_sec > 946684800) // timestamp of 2000-01-01 00:00:00
-	{
-		LOGINFO("TWFunc::Fixup_Time: not fixing time, it seems to be already okay (after year 2000).\n");
-		return;
-	}
 
 	if(!PartitionManager.Mount_By_Path("/data", false))
 		return;
@@ -1137,7 +1217,7 @@ void TWFunc::Fixup_Time_On_Boot()
 
 	if(ats_path.empty())
 	{
-		LOGINFO("TWFunc::Fixup_Time: no ats files found, leaving time as-is!\n");
+		LOGINFO("TWFunc::Fixup_Time: no ats files found, leaving untouched!\n");
 		return;
 	}
 
@@ -1170,6 +1250,9 @@ void TWFunc::Fixup_Time_On_Boot()
 	}
 
 	settimeofday(&tv, NULL);
+
+	LOGINFO("TWFunc::Fixup_Time: Date and time corrected: %s\n", TWFunc::Get_Current_Date().c_str());
+
 #endif
 }
 
@@ -1209,6 +1292,58 @@ bool TWFunc::Create_Dir_Recursive(const std::string& path, mode_t mode, uid_t ui
 		}
 	}
 	return true;
+}
+
+int TWFunc::Set_Brightness(std::string brightness_value)
+{
+
+	std::string brightness_file = DataManager::GetStrValue("tw_brightness_file");;
+
+	if (brightness_file.compare("/nobrightness") != 0) {
+		std::string secondary_brightness_file = DataManager::GetStrValue("tw_secondary_brightness_file");
+		LOGINFO("TWFunc::Set_Brightness: Setting brightness control to %s\n", brightness_value.c_str());
+		int result = TWFunc::write_file(brightness_file, brightness_value);
+		if (secondary_brightness_file != "") {
+			LOGINFO("TWFunc::Set_Brightness: Setting SECONDARY brightness control to %s\n", brightness_value.c_str());
+			TWFunc::write_file(secondary_brightness_file, brightness_value);
+		}
+		return result;
+	}
+	return -1;
+}
+
+bool TWFunc::Toggle_MTP(bool enable) {
+#ifdef TW_HAS_MTP
+	static int was_enabled = false;
+
+	if (enable && was_enabled) {
+		if (!PartitionManager.Enable_MTP())
+			PartitionManager.Disable_MTP();
+	} else {
+		was_enabled = DataManager::GetIntValue("tw_mtp_enabled");
+		PartitionManager.Disable_MTP();
+		usleep(500);
+	}
+	return was_enabled;
+#else
+	return false;
+#endif
+}
+
+void TWFunc::SetPerformanceMode(bool mode) {
+	if (mode) {
+		property_set("recovery.perf.mode", "1");
+	} else {
+		property_set("recovery.perf.mode", "0");
+	}
+	// Some time for events to catch up to init handlers
+	usleep(500000);
+}
+
+std::string TWFunc::to_string(unsigned long value) {
+	std::ostringstream os;
+	os << value;
+	return os.str();
 }
 
 bool TWFunc::loadTheme()
@@ -1381,6 +1516,24 @@ void TWFunc::stringReplace(std::string& str, char before, char after)
 		if(c == before)
 			c = after;
 	}
+}
+
+void TWFunc::trim(std::string& str)
+{
+	size_t start = 0, len;
+	for(size_t i = 0; i < str.size() && isspace(str[i]); ++i)
+		++start;
+
+	if(start >= str.size())
+	{
+		str = "";
+		return;
+	}
+
+	len = str.size() - start;
+	for(size_t i = str.size() - 1; i > start && isspace(str[i]); --i)
+		--len;
+	str = str.substr(start, len);
 }
 
 #ifdef HAVE_SELINUX
