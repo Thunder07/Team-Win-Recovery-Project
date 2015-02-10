@@ -11,6 +11,7 @@
 
 	<include>
 		<xmlfile name="portrait.xml" />
+		<xmlfile name="multirom.xml" />
 	</include>
 
 	<resources>
@@ -50,7 +51,7 @@
 		<variable name="col1_x" value="0" />
 		<variable name="col2_x" value="780" />
 		<variable name="col_center_x" value="410" />
-		<variable name="col_center_medium_x" value="550" />
+		<variable name="col_center_medium_x" value="593" />
 		<variable name="center_x" value="720" />
 		<variable name="row1_y" value="339" />
 		<variable name="row2_y" value="915" />
@@ -81,11 +82,12 @@
 		<variable name="row17_text_y" value="1935" />
 		<variable name="row18_text_y" value="2035" />
 		<variable name="zip_status_y" value="1375" />
+		<variable name="flash_list_height" value="650" />
 		<variable name="tz_selected_y" value="319" />
 		<variable name="tz_set_y" value="1995" />
 		<variable name="tz_current_y" value="1895" />
 		<variable name="col_progressbar_x" value="`0" />
-		<variable name="row_progressbar_y" value="2195" />
+		<variable name="row_progressbar_y" value="2250" />
 		<variable name="col1_medium_x" value="13" />
 		<variable name="col2_medium_x" value="370" />
 		<variable name="col3_medium_x" value="730" />
@@ -94,7 +96,7 @@
 		<variable name="row2_medium_y" value="459" />
 		<variable name="row3_medium_y" value="521" />
 		<variable name="row4_medium_y" value="858" />
-		<variable name="row5_medium_y" value="1057" />
+		<variable name="row5_medium_y" value="1293" />
 		<variable name="row6_medium_y" value="1676" />
 		<variable name="row7_medium_y" value="971" />
 		<variable name="slider_x" value="40" />
@@ -199,6 +201,31 @@
 		<variable name="slidervalue_padding" value="30" />
 		<variable name="slidervalue_sliderw" value="15" />
 		<variable name="slidervalue_sliderh" value="90" />
+		
+		<variable name="mrom_inject_txt_x" value="1170" />
+		<variable name="mrom_inject_txt_y" value="1370" />
+		<variable name="mrom_wipe_col1_x" value="248" />
+		<variable name="mrom_wipe_col2_x" value="602" />
+		<variable name="mrom_wipe_col3_x" value="958" />
+		<variable name="mrom_boot_delay_sec_x" value="793" />
+		<variable name="mrom_boot_delay_add_x" value="910" />
+		<variable name="mrom_boot_rom_h" value="1064" />
+		<variable name="mrom_ubuntu_desktop_x" value="390" />
+		<variable name="mrom_ubuntu_touch_x" value="910" />
+		<variable name="mrom_install_loc_h" value="691" />
+		<variable name="mrom_install_refresh_y" value="1782" />
+		<variable name="mrom_img1_text_y" value="798" />
+		<variable name="mrom_img2_text_y" value="1037" />
+		<variable name="mrom_img3_text_y" value="1277" />
+		<variable name="mrom_img4_text_y" value="1516" />
+		<variable name="mrom_img5_text_y" value="1755" />
+		<variable name="mrom_img1_btn_y" value="698" />
+		<variable name="mrom_img2_btn_y" value="937" />
+		<variable name="mrom_img3_btn_y" value="1177" />
+		<variable name="mrom_img4_btn_y" value="1416" />
+		<variable name="mrom_img5_btn_y" value="1656" />
+		<variable name="mrom_rom_loc_list_h" value="1144" />
+		<variable name="mrom_swap_list_h" value="691" />
 	</variables>
 
 	<mousecursor>
@@ -237,7 +264,7 @@
 
 			<object type="text" color="%text_color%">
 				<font resource="font" />
-				<placement x="539" y="132" />
+				<placement x="489" y="132" />
 				<conditions>
 					<condition var1="tw_no_battery_percent" var2="0" />
 					<condition var1="tw_battery" op=">" var2="0" />
@@ -248,7 +275,7 @@
 
 			<object type="text" color="%text_color%">
 				<font resource="font" />
-				<placement x="839" y="132" />
+				<placement x="819" y="132" />
 				<conditions>
 					<condition var1="tw_no_cpu_temp" var2="0" />
 				</conditions>

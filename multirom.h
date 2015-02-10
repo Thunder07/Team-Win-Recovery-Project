@@ -219,9 +219,7 @@ private:
 	static void restoreROMPath();
 
 	static bool copyPartWithXAttrs(const std::string& src, const std::string& dst, const std::string& part, bool skipMedia = false);
-	static bool copyPartWithXAttrs2(const std::string& src, const std::string& dst, const std::string& part, bool skipMedia = false);
-	static bool copyXAttrs(const std::string& from, const std::string& to, unsigned char type);
-	static bool copySingleXAttr(const char *from, const char *to);
+
 
 	static std::string m_path;
 	static std::string m_mount_rom_paths[2];

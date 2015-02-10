@@ -20,15 +20,9 @@
 #include "partitions.hpp"
 #include "twrp-functions.hpp"
 #include "twinstall.h"
-#if (ANDROID_VERSION >= 5)
 #include "minzip/SysUtil.h"
 #include "minzip/Zip.h"
 #include "verifier.h"
-#else
-#include "minzipold/SysUtil.h"
-#include "minzipold/Zip.h"
-#include "verifierold.h"
-#endif
 #include "variables.h"
 #include "openrecoveryscript.hpp"
 
@@ -38,7 +32,8 @@ extern "C" {
 #include "multirom_hooks.h"
 }
 
-#include "libblkid/blkid.h"
+#include "libblkid/include/blkid.h"
+#include "cp_xattrs/libcp_xattrs.h"
 
 std::string MultiROM::m_path = "";
 std::string MultiROM::m_boot_dev = "";
@@ -125,7 +120,6 @@ void MultiROM::findPath()
 	m_has_firmware = (fw && fw->Current_File_System == "vfat");
 
 	static const char *paths[] = {
-		"/sdcard/media/0/multirom",
 		"/data/media/0/multirom",
 		"/data/media/multirom",
 		NULL
@@ -381,7 +375,6 @@ void MultiROM::deinitBackup()
 
 int MultiROM::getType(std::string name)
 {
-	return ROM_ANDROID_USB_IMG;
 	std::string path = getRomsPath() + "/" + name + "/";
 	if(getRomsPath().find("/mnt") != 0) // Internal memory
 	{
@@ -688,51 +681,6 @@ bool MultiROM::changeMounts(std::string name)
 	return true;
 }
 
-bool MultiROM::changeMounts2(std::string name)
-{
-	gui_print("Changing mounts to ROM %s...\n", name.c_str());
-
-	char cmd[256];
-	static const char *parts[] = { "system_t", "data_t", "cache_t" };
-	static const char *imgs[] = { "system", "data", "cache" };
-	for(size_t i = 0; i < sizeof(parts)/sizeof(parts[0]); ++i)
-		{
-			mkdir(parts[i], 0777);
-			sprintf(cmd, "mount -o loop %s/%s/%s.img /%s", getRomsPath().c_str(), name.c_str(), imgs[i], parts[i]);
-			if(system(cmd) != 0)
-			{
-				gui_print("Failed to mount %s image!\n",imgs[i]);
-				return false;
-			}
-
-		}
-
-	
-
-	return true;
-}
-
-bool MultiROM::uMounts2(std::string name)
-{
-	gui_print("Unmounting ROM %s...\n", name.c_str());
-
-	char cmd[256];
-	static const char *parts[] = { "system_t", "data_t", "cache_t" };
-	for(size_t i = 0; i < sizeof(parts)/sizeof(parts[0]); ++i)
-		{
-			sprintf(cmd, "umount /%s", parts[i]);
-			if(system(cmd) != 0)
-			{
-				gui_print("Failed to unmount %s!\n",parts[i]);
-			}
-
-		}
-
-	
-
-	return true;
-}
-
 void MultiROM::restoreMounts()
 {
 	if(!PartitionManager.Has_Extra_Contexts())
@@ -783,7 +731,6 @@ void MultiROM::restoreMounts()
 
 void MultiROM::translateToRealdata(std::string& path)
 {
-	return;
 	if(path.find("/sdcard/") != std::string::npos)
 	{
 		struct stat info;
@@ -849,7 +796,12 @@ bool MultiROM::createFakeSystemImg()
 		return false;
 	}
 
-	if(!createImage(sysimg, "system", sys->GetSizeTotal()/1024/1024 + 32))
+	uint64_t size = sys->GetSizeRaw();
+	if(size == 0)
+		size = sys->GetSizeTotal();
+	size = size/1024/1024 + 32;
+
+	if(!createImage(sysimg, "system", size))
 	{
 		LOGERR("Failed to create system.img!");
 		return false;
@@ -944,11 +896,7 @@ bool MultiROM::flashZip(std::string rom, std::string file)
 		gui_print("ZIP successfully installed\n");
 
 	if(has_block_update)
-	{
-		if(status == INSTALL_SUCCESS)
-			copyXAttrs("/tmpsystem", "/system", DT_DIR);
 		system_args("busybox umount -d /tmpsystem");
-	}
 
 exit:
 	if(has_block_update)
@@ -1002,8 +950,6 @@ bool MultiROM::flashORSZip(std::string file, int *wipe_cache)
 
 	if(has_block_update)
 	{
-		if(status == INSTALL_SUCCESS)
-			copyXAttrs("/tmpsystem", "/system", DT_DIR);
 		system_args("busybox umount -d /tmpsystem");
 		failsafeCheckPartition("/tmp/mrom_fakesyspart");
 	}
@@ -1018,7 +964,6 @@ bool MultiROM::verifyZIP(const std::string& file, int &verify_status)
 		return true;
 
 	gui_print("Verifying zip signature...\n");
-#if (ANDROID_VERSION >= 5)
 	MemMapping map;
 	if (sysMapFile(file.c_str(), &map) != 0) {
 		LOGERR("Failed to sysMapFile '%s'\n", file.c_str());
@@ -1026,9 +971,6 @@ bool MultiROM::verifyZIP(const std::string& file, int &verify_status)
 	}
 	int ret_val = verify_file(map.addr, map.length);
 	sysReleaseMap(&map);
-#else
-	int ret_val = verify_file(file.c_str());
-#endif
 	if (ret_val != VERIFY_SUCCESS) {
 		LOGERR("Zip signature verification failed: %i\n", ret_val);
 		return false;
@@ -1139,7 +1081,9 @@ void MultiROM::appendBraces(FILE *out, const char *line)
 
 	if(tildas)
 		fputc(';', out);
-	fputc('\n', out);
+
+	if(counter || tildas)
+		fputc('\n', out);
 }
 
 bool MultiROM::prepareZIP(std::string& file, bool &has_block_update)
@@ -1172,21 +1116,15 @@ bool MultiROM::prepareZIP(std::string& file, bool &has_block_update)
 	if(!new_script)
 		return false;
 
-#if (ANDROID_VERSION >= 5)
 	MemMapping map;
 	if (sysMapFile(file.c_str(), &map) != 0) {
 		LOGERR("Failed to sysMapFile '%s'\n", file.c_str());
 		fclose(new_script);
 		return false;
 	}
-#endif
 
 	ZipArchive zip;
-#if (ANDROID_VERSION >= 5)
 	if (mzOpenZipArchive(map.addr, map.length, &zip) != 0)
-#else
-	if (mzOpenZipArchive(file.c_str(), &zip) != 0)
-#endif
 	{
 		gui_print("Failed to open ZIP archive %s!\n", file.c_str());
 		goto exit;
@@ -1206,9 +1144,7 @@ bool MultiROM::prepareZIP(std::string& file, bool &has_block_update)
 	}
 
 	mzCloseZipArchive(&zip);
-#if (ANDROID_VERSION >= 5)
 	sysReleaseMap(&map);
-#endif
 
 	token = strtok_r(script_data, "\n", &saveptr);
 	while(token)
@@ -1232,8 +1168,7 @@ bool MultiROM::prepareZIP(std::string& file, bool &has_block_update)
 				fputs("run_program(\"/sbin/sh\", \"-c\", \"chattr -R -i /system/*\");\n", new_script);
 				fputs("run_program(\"/sbin/sh\", \"-c\", \"rm -rf /system/*\");\n", new_script);
 			}
-
-			if(strstr(p, "block_image_update(") == p)
+			else if(strstr(p, "block_image_update(") == p)
 			{
 				has_block_update = true;
 
@@ -1243,9 +1178,17 @@ bool MultiROM::prepareZIP(std::string& file, bool &has_block_update)
 				TWPartition *sys = PartitionManager.Find_Original_Partition_By_Path("/system");
 				if(sys)
 				{
-					fprintf(new_script, "run_program(\"/sbin/sh\", \"-c\", \"mkdir -p /tmpsystem && mount -t ext4 $(readlink -f -n %s) /tmpsystem && cp -a /tmpsystem/* /system/\");\n",
+					fprintf(new_script, "run_program(\"/sbin/sh\", \"-c\", \""
+						"mkdir -p /tmpsystem && mount -t ext4 $(readlink -f -n %s) /tmpsystem && "
+						"(cp -a /tmpsystem/* /system/ || true) && cp_xattrs /tmpsystem /system"
+						"\");\n",
 							sys->Actual_Block_Device.c_str());
 				}
+			}
+			else
+			{
+				// Add dummy line, because ifs need to have something in them
+				fprintf(new_script, "ui_print(\"\"); # orig: \"%s\" - removed by multirom\n", p);
 			}
 		}
 		token = strtok_r(NULL, "\n", &saveptr);
@@ -1299,9 +1242,7 @@ bool MultiROM::prepareZIP(std::string& file, bool &has_block_update)
 exit:
 	free(script_data);
 	mzCloseZipArchive(&zip);
-#if (ANDROID_VERSION >= 5)
 	sysReleaseMap(&map);
-#endif
 	fclose(new_script);
 	return false;
 }
@@ -1913,7 +1854,6 @@ bool MultiROM::disableFlashKernelAct(std::string name, std::string loc)
 
 int MultiROM::getType(int os, std::string loc)
 {
-	return ROM_ANDROID_USB_IMG;
 	bool images = installLocNeedsImages(loc);
 	switch(os)
 	{
@@ -2859,7 +2799,7 @@ void MultiROM::executeCacheScripts()
 void MultiROM::startSystemImageUpgrader()
 {
 	DataManager::SetValue("tw_back", "main");
-	DataManager::SetValue("tw_action", "system-image-upgrader");
+	DataManager::SetValue("tw_action", "system_image_upgrader");
 	DataManager::SetValue("tw_has_action2", "0");
 	DataManager::SetValue("tw_action2", "");
 	DataManager::SetValue("tw_action2_param", "");
@@ -2882,7 +2822,7 @@ bool MultiROM::copyPartWithXAttrs(const std::string& src, const std::string& dst
 			return false;
 		}
 
-		if(!copyXAttrs(src + "/" + part, dst + "/" + part, DT_DIR))
+		if(!cp_xattrs_recursive(src + "/" + part, dst + "/" + part, DT_DIR))
 			return false;
 
 		return true;
@@ -2900,7 +2840,7 @@ bool MultiROM::copyPartWithXAttrs(const std::string& src, const std::string& dst
 		snprintf(path1, sizeof(path1), "%s/%s", src.c_str(), part.c_str());
 		snprintf(path2, sizeof(path2), "%s/%s", dst.c_str(), part.c_str());
 
-		if(!copySingleXAttr(path1, path2))
+		if(!cp_xattrs_single_file(path1, path2))
 			return false;
 
 		d = opendir(path1);
@@ -2925,7 +2865,7 @@ bool MultiROM::copyPartWithXAttrs(const std::string& src, const std::string& dst
 				if(stat(path1, &st) >= 0)
 				{
 					mkdir(path2, st.st_mode);
-					copySingleXAttr(path1, path2);
+					cp_xattrs_single_file(path1, path2);
 				}
 				continue;
 			}
@@ -2940,7 +2880,7 @@ bool MultiROM::copyPartWithXAttrs(const std::string& src, const std::string& dst
 			snprintf(path1, sizeof(path1), "%s/%s/%s", src.c_str(), part.c_str(), dt->d_name);
 			snprintf(path2, sizeof(path2), "%s/%s/%s", dst.c_str(), part.c_str(), dt->d_name);
 
-			if(!copyXAttrs(path1, path2, dt->d_type))
+			if(!cp_xattrs_recursive(path1, path2, dt->d_type))
 			{
 				res = false;
 				break;
@@ -2950,156 +2890,6 @@ bool MultiROM::copyPartWithXAttrs(const std::string& src, const std::string& dst
 		closedir(d);
 		return res;
 	}
-}
-
-bool MultiROM::copyPartWithXAttrs2(const std::string& src, const std::string& dst, const std::string& part, bool skipMedia)
-{
-	if(!skipMedia)
-	{
-		gui_print("Copying /%s...\n", part.c_str());
-		if(system_args("cp -a \"%s/%s/\"* \"%s/%s_t/\"", src.c_str(), part.c_str(), dst.c_str(), part.c_str()) != 0)
-		{
-			LOGERR("Copying failed, see log for more info!\n");
-			return false;
-		}
-
-		if(!copyXAttrs(src + "/" + part, dst + "/" + part + "_t", DT_DIR))
-			return false;
-
-		return true;
-	}
-	else
-	{
-		char path1[256];
-		char path2[256];
-		DIR *d;
-		struct dirent *dt;
-		bool res = true;
-
-		gui_print("Copying /%s...\n", part.c_str());
-
-		snprintf(path1, sizeof(path1), "%s/%s", src.c_str(), part.c_str());
-		snprintf(path2, sizeof(path2), "%s/%s_t", dst.c_str(), part.c_str());
-
-		if(!copySingleXAttr(path1, path2))
-			return false;
-
-		d = opendir(path1);
-		if(!d)
-		{
-			LOGERR("Failed to open %s!\n", path1);
-			return false;
-		}
-
-		while((dt = readdir(d)))
-		{
-			if (dt->d_type == DT_DIR && dt->d_name[0] == '.' &&
-				(dt->d_name[1] == '.' || dt->d_name[1] == 0))
-				continue;
-
-			if(dt->d_type == DT_DIR && strcmp(dt->d_name, "media") == 0)
-			{
-				struct stat st;
-				snprintf(path1, sizeof(path1), "%s/%s/media", src.c_str(), part.c_str());
-				snprintf(path2, sizeof(path2), "%s/%s_t/media", dst.c_str(), part.c_str());
-
-				if(stat(path1, &st) >= 0)
-				{
-					mkdir(path2, st.st_mode);
-					copySingleXAttr(path1, path2);
-				}
-				continue;
-			}
-
-			if(system_args("cp -a \"%s/%s/%s\" \"%s/%s_t/\"", src.c_str(), part.c_str(), dt->d_name, dst.c_str(), part.c_str()) != 0)
-			{
-				LOGERR("Copying failed, see log for more info!\n");
-				res = false;
-				break;
-			}
-
-			snprintf(path1, sizeof(path1), "%s/%s/%s", src.c_str(), part.c_str(), dt->d_name);
-			snprintf(path2, sizeof(path2), "%s/%s_t/%s", dst.c_str(), part.c_str(), dt->d_name);
-
-			if(!copyXAttrs(path1, path2, dt->d_type))
-			{
-				res = false;
-				break;
-			}
-		}
-
-		closedir(d);
-		return res;
-	}
-}
-
-bool MultiROM::copySingleXAttr(const char *from, const char *to)
-{
-	ssize_t res;
-	char selabel[512];
-	struct vfs_cap_data cap_data;
-
-	res = lgetxattr(from, "security.capability", &cap_data, sizeof(struct vfs_cap_data));
-	if (res == sizeof(struct vfs_cap_data))
-	{
-		res = lsetxattr(to, "security.capability", &cap_data, sizeof(struct vfs_cap_data), 0);
-		if(res < 0 && errno != ENOENT)
-		{
-			LOGERR("Failed to lsetxattr capability on %s: %d (%s)\n", to, errno, strerror(errno));
-			return false;
-		}
-	}
-
-	res = lgetxattr(from, "security.selinux", selabel, sizeof(selabel));
-	if(res > 0)
-	{
-		selabel[sizeof(selabel)-1] = 0;
-		res = lsetxattr(to, "security.selinux", selabel, strlen(selabel)+1, 0);
-		if(res < 0 && errno != ENOENT)
-		{
-			LOGERR("Failed to lsetxattr selinux on %s: %d (%s)\n", to, errno, strerror(errno));
-			return false;
-		}
-	}
-	else if(res < 0 && errno == ERANGE)
-		LOGERR("lgetxattr selinux on %s failed: label is too long\n", from);
-
-	return true;
-}
-
-bool MultiROM::copyXAttrs(const std::string& from, const std::string& to, unsigned char type)
-{
-	if(!copySingleXAttr(from.c_str(), to.c_str()))
-		return false;
-
-	if(type != DT_DIR)
-		return true;
-
-	DIR *d;
-	struct dirent *dt;
-
-	d = opendir(from.c_str());
-	if(!d)
-	{
-		LOGERR("Failed to open dir %s\n", from.c_str());
-		return false;
-	}
-
-	while((dt = readdir(d)))
-	{
-		if (dt->d_type == DT_DIR && dt->d_name[0] == '.' &&
-			(dt->d_name[1] == '.' || dt->d_name[1] == 0))
-			continue;
-
-		if(!copyXAttrs(from + "/" + dt->d_name, to + "/" + dt->d_name, dt->d_type))
-		{
-			closedir(d);
-			return false;
-		}
-	}
-
-	closedir(d);
-	return true;
 }
 
 bool MultiROM::copyInternal(const std::string& dest_name)
@@ -3121,11 +2911,7 @@ bool MultiROM::copyInternal(const std::string& dest_name)
 		return false;
 	}
 
-	MultiROM::addBaseFolder("data", DATA_IMG_MINSIZE, DATA_IMG_DEFSIZE);
-	MultiROM::addBaseFolder("system", SYS_IMG_MINSIZE, SYS_IMG_DEFSIZE);
-	MultiROM::addBaseFolder("cache", CACHE_IMG_MINSIZE, CACHE_IMG_DEFSIZE);
-
-	if(!createDirs(dest_name, ROM_ANDROID_USB_IMG))
+	if(!createDirs(dest_name, ROM_ANDROID_INTERNAL))
 		goto erase_incomplete;
 
 	gui_print("Copying boot partition...\n");
@@ -3139,20 +2925,16 @@ bool MultiROM::copyInternal(const std::string& dest_name)
 	if(!extractBootForROM(dest_dir))
 		goto erase_incomplete;
 
-	changeMounts2(dest_name);
-
 	static const char *parts[] = { "system", "data", "cache" };
 	for(size_t i = 0; i < sizeof(parts)/sizeof(parts[0]); ++i)
-		if(!copyPartWithXAttrs2("", "", parts[i], strcmp(parts[i], "data") == 0))
+		if(!copyPartWithXAttrs("", dest_dir, parts[i], strcmp(parts[i], "data") == 0))
 			goto erase_incomplete;
 
-	uMounts2(dest_name);
 
 	return true;
 
 erase_incomplete:
 	gui_print("Failed, removing incomplete ROM...\n");
-	uMounts2(dest_name);
 	system_args("rm -rf \"%s\"", dest_dir.c_str());
 	return false;
 }
